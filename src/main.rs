@@ -2,7 +2,7 @@ use std::{
     char::REPLACEMENT_CHARACTER,
     collections::HashSet,
     f32::consts::PI,
-    marker::PhantomData,
+    marker::PhantomData, thread::sleep, time::Duration,
 };
 
 use config::config::{
@@ -239,71 +239,80 @@ impl RaycastSystem {
         let angle_step_size = MAX_ANGLE / (rays as f32);
         let half_rays = rays / 2;
         const EPSILON: f32 = 1e-6;
+
         for ray_idx in 0..rays {
-            let curr_angle =
-                angle - (half_rays as f32) * angle_step_size + (ray_idx as f32) * angle_step_size;
+            let curr_angle = angle - (half_rays as f32) * angle_step_size + (ray_idx as f32) * angle_step_size;
             let mut curr_pos = origin;
             let direction = Vec2::new(curr_angle.cos() + EPSILON, curr_angle.sin() + EPSILON);
-            for curr_tile in 0..max_tiles {
-                let curr_tiles = curr_pos.round();
-                if
-                    curr_tiles.x < 0.0 ||
-                    curr_tiles.x >= (WORLD_WIDTH as f32) ||
-                    curr_tiles.y < 0.0 ||
-                    curr_tiles.y >= (WORLD_HEIGHT as f32)
-                {
+            
+            let mut map_pos = curr_pos.trunc();
+            let delta_dist = Vec2::new( // how far ray has to move to go from one x/y side to the next x/y side
+                (1.0 / direction.x).abs(),
+                (1.0 / direction.y).abs()
+            );
+            let step = Vec2::new( // tile based step size
+                if direction.x < 0.0 { -1.0 } else { 1.0 },
+                if direction.y < 0.0 { -1.0 } else { 1.0 }
+            );
+            let mut side_dist = Vec2::new( // next x or y side distance, stays constant until we hit that side 
+                (if direction.x < 0.0 { curr_pos.x - map_pos.x } else { map_pos.x + 1.0 - curr_pos.x }) * delta_dist.x,
+                (if direction.y < 0.0 { curr_pos.y - map_pos.y } else { map_pos.y + 1.0 - curr_pos.y }) * delta_dist.y
+            );
+
+            for _ in 0..max_tiles {
+                if map_pos.x < 0.0 || map_pos.x >= (WORLD_WIDTH as f32) || 
+                   map_pos.y < 0.0 || map_pos.y >= (WORLD_HEIGHT as f32) {
                     break;
                 }
-                let dist_to_x_edge = if direction.x > 0.0 {
-                    (curr_tiles.x + 1.0 - curr_pos.x) / direction.x
-                } else {
-                    (curr_pos.x - curr_tiles.x) / -direction.x
-                };
-                let dist_to_y_edge = if direction.y > 0.0 {
-                    (curr_tiles.y + 1.0 - curr_pos.y) / direction.y
-                } else {
-                    (curr_pos.y - curr_tiles.y) / -direction.y
-                };
-                if dist_to_x_edge < dist_to_y_edge {
-                    curr_pos += direction * dist_to_x_edge.max(1.0);
-                } else {
-                    curr_pos += direction * dist_to_y_edge.max(1.0);
-                }
-                let curr_tile = curr_pos.round();
+
                 renderer.render_rectangle(
                     ctx,
-                    curr_tile,
-                    curr_tile + Vec2::new(1.0, 1.0),
+                    map_pos,
+                    map_pos + Vec2::new(1.0, 1.0),
                     Vec4::new(1.0, 1.0, 0.0, 1.0)
                 );
-                match
-                    map
-                        .get(curr_tile.y.round() as usize)
-                        .expect("Invalid tile y idx into map")
-                        .get(curr_tile.x.round() as usize)
-                        .expect("Invalid tile x idx into map")
-                {
-                    EntityType::Wall => {
+
+                let is_x_side = side_dist.x < side_dist.y;
+                if is_x_side {
+                    side_dist.x += delta_dist.x;
+                    map_pos.x += step.x;
+                } else {
+                    side_dist.y += delta_dist.y;
+                    map_pos.y += step.y;
+                }
+
+                let map_idx_x = map_pos.x as usize;
+                let map_idx_y = map_pos.y as usize;
+
+                match map.get(map_idx_y).and_then(|row| row.get(map_idx_x)) {
+                    Some(EntityType::Wall) => {
                         res.push(RaycastResult {
                             distance: curr_pos.distance(origin),
-                            entity_pos: curr_tile,
+                            entity_pos: map_pos,
                             entity: EntityType::Wall,
                         });
                         break;
                     }
-                    EntityType::Enemy => {
+                    Some(EntityType::Enemy) => {
                         res.push(RaycastResult {
                             distance: curr_pos.distance(origin),
-                            entity_pos: curr_tile,
+                            entity_pos: map_pos,
                             entity: EntityType::Enemy,
                         });
                         break;
                     }
                     _ => {}
                 }
+
+                // Update to next tile
+                curr_pos = if is_x_side {
+                    Vec2::new(map_pos.x + (if step.x > 0.0 { 0.0 } else { 1.0 }), curr_pos.y + direction.y * side_dist.x)
+                } else {
+                    Vec2::new(curr_pos.x + direction.x * side_dist.y, map_pos.y + (if step.y > 0.0 { 0.0 } else { 1.0 }))
+                };
             }
         }
-        return res;
+        res
     }
 }
 struct RaycastResult {
@@ -551,6 +560,7 @@ impl EventHandler for Stage {
                         Vec4::new(1.0, 0.0, 0.0, 1.0)
                     );
                 }
+                self.ctx.apply_pipeline(&self.pipelines[2]);
 
                 self.render_system_rect.render_rectangle(
                     &mut *self.ctx,
@@ -558,26 +568,27 @@ impl EventHandler for Stage {
                     self.world.player.pos + Vec2::new(1.0, 1.0),
                     Vec4::new(0.0, 0.0, 1.0, 1.0)
                 );
+                self.ctx.apply_pipeline(&self.pipelines[2]);
 
                 let res = RaycastSystem::raycast_and_visualize_tiles_traversed(
                     &mut *self.ctx,
                     &self.render_system_rect,
-                    self.world.player.pos,
+                    self.world.player.pos + Vec2::new(0.5, 0.5),
                     self.world.player.angle,
-                    1,
+                    3,
                     5,
                     &self.world.map
                 );
                 if res.len() > 0 {
-                    println!("Raycast hit: {:?}", res[0].entity_pos);
-                    self.render_system_rect.render_rectangle(
-                        &mut *self.ctx,
-                        res[0].entity_pos,
-                        res[0].entity_pos + Vec2::new(1.0, 1.0),
-                        Vec4::new(0.0, 1.0, 0.0, 1.0)
-                    );
-                } else {
-                    println!("Raycast hit: None");
+                    for ray in res {
+                        println!("Ray hit entity: {:?} at pos: {:?} with distance: {}", ray.entity, ray.entity_pos.trunc(), ray.distance);
+                        self.render_system_rect.render_rectangle(
+                            &mut *self.ctx,
+                            ray.entity_pos,
+                            ray.entity_pos + Vec2::new(1.0, 1.0),
+                            Vec4::new(0.0, 1.0, 0.0, 1.0)
+                        );
+                    }
                 }
             }
             _ => {}
