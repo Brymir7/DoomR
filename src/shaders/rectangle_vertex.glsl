@@ -1,7 +1,7 @@
 #version 100
 
 in vec2 pos;
-in vec4 color0;
+uniform vec4 rect_color;
 uniform vec2 screen_size;
 uniform mat4 model;
 
@@ -13,6 +13,6 @@ void main() {
     position.xy = position.xy / screen_size * 2.0 - 1.0;
     position.y *= -1.0;
     gl_Position = position;
-    color = color0;
+    color = rect_color;
 }
     

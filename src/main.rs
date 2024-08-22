@@ -1,4 +1,9 @@
-use std::collections::HashSet;
+use std::{
+    char::REPLACEMENT_CHARACTER,
+    collections::HashSet,
+    f32::consts::PI,
+    marker::PhantomData,
+};
 
 use config::config::{
     PHYSICS_FRAME_TIME,
@@ -47,9 +52,9 @@ struct Player {
     vel: Vec2,
     angle: f32,
     health: f32,
-    render_data: RenderData, // will render weapon
+    // render_data: VertexRenderData, // will render weapon
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum EntityType {
     None = 0,
     Wall = 1,
@@ -57,45 +62,41 @@ enum EntityType {
     Enemy = 3,
 }
 #[derive(Clone)]
-struct RenderData {
+struct VertexRenderData {
     vertex_buffer: BufferId,
     indices: Vec<u16>,
     index_buffer: BufferId,
 }
+#[derive(Clone)]
+struct PointRenderData {
+    points_buffer: BufferId,
+    indices: Vec<u16>,
+    index_buffer: BufferId,
+}
+struct RectangleRenderSystem {
+    vertex_buffer: BufferId,
+    index_buffer: BufferId,
+}
 
-struct RenderDataCreator;
-impl RenderDataCreator {
-    fn render_data_for_rectangle(
-        ctx: &mut Context,
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
-        color: Vec4
-    ) -> RenderData {
-        let x = (x as f32) * (TILE_SIZE_X_PIXEL as f32);
-        let y = (y as f32) * (TILE_SIZE_Y_PIXEL as f32);
-        let width = width as f32;
-        let height = height as f32;
-        let half_width = width * 0.5 * (TILE_SIZE_X_PIXEL as f32);
-        let half_height = height * 0.5 * (TILE_SIZE_Y_PIXEL as f32);
+impl RectangleRenderSystem {
+    fn new(ctx: &mut dyn RenderingBackend) -> Self {
         let vertices = vec![
-            Vec2::new(x - half_width, y - half_height),
-            Vec2::new(x + half_width, y - half_height),
-            Vec2::new(x + half_width, y + half_height),
-            Vec2::new(x - half_width, y + half_height)
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(0.0, 1.0)
         ];
+
         let mut vertex_buffer_data: Vec<f32> = Vec::new();
         for vertex in vertices {
             vertex_buffer_data.push(vertex.x);
             vertex_buffer_data.push(vertex.y);
-            vertex_buffer_data.extend_from_slice(&[color.x, color.y, color.z, color.w]);
         }
 
         let indices = vec![0, 1, 2, 0, 2, 3];
         let vertex_buffer = ctx.new_buffer(
             BufferType::VertexBuffer,
-            BufferUsage::Immutable,
+            BufferUsage::Dynamic,
             BufferSource::slice(&vertex_buffer_data)
         );
         let index_buffer = ctx.new_buffer(
@@ -103,34 +104,47 @@ impl RenderDataCreator {
             BufferUsage::Immutable,
             BufferSource::slice(&indices)
         );
-        RenderData {
+
+        RectangleRenderSystem {
             vertex_buffer,
-            indices,
             index_buffer,
         }
     }
-}
-struct RenderMapSystem;
-impl RenderMapSystem {
-    fn render(
+
+    fn render_rectangle(
+        &self,
         ctx: &mut dyn RenderingBackend,
-        positions: &Vec<Vec2>,
-        render_data: &Vec<RenderData>,
-        pipelines: &Vec<Pipeline>
+        position1: Vec2,
+        position2: Vec2,
+        color: Vec4
     ) {
-        for (i, data) in render_data.iter().enumerate() {
-            let bindings = Bindings {
-                vertex_buffers: vec![data.vertex_buffer],
-                index_buffer: data.index_buffer,
-                images: vec![],
-            };
-            ctx.apply_pipeline(&pipelines[0]);
-            ctx.apply_bindings(&bindings);
-            let screen_size = Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32);
-            let model = Mat4::from_translation(Vec3::new(positions[i].x, -positions[i].y, 0.0));
-            ctx.apply_uniforms(UniformsSource::table(&(model, screen_size)));
-            ctx.draw(0, data.indices.len() as i32, 1);
-        }
+        let screen_position1 = Vec2::new(
+            position1.x * (TILE_SIZE_X_PIXEL as f32),
+            position1.y * (TILE_SIZE_Y_PIXEL as f32)
+        );
+        let screen_position2 = Vec2::new(
+            position2.x * (TILE_SIZE_X_PIXEL as f32),
+            position2.y * (TILE_SIZE_Y_PIXEL as f32)
+        );
+
+        let width = (screen_position2.x - screen_position1.x).abs();
+        let height = (screen_position2.y - screen_position1.y).abs();
+
+        let translation = Mat4::from_translation(
+            Vec3::new(screen_position1.x, screen_position1.y, 0.0)
+        );
+        let scale = Mat4::from_scale(Vec3::new(width, height, 1.0));
+        let model = translation * scale;
+
+        let bindings = Bindings {
+            vertex_buffers: vec![self.vertex_buffer.clone()],
+            index_buffer: self.index_buffer.clone(),
+            images: vec![],
+        };
+        ctx.apply_bindings(&bindings);
+        let screen_size = Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32);
+        ctx.apply_uniforms(UniformsSource::table(&(model, screen_size, color)));
+        ctx.draw(0, 6, 1);
     }
 }
 struct MovementSystem;
@@ -141,36 +155,168 @@ impl MovementSystem {
         }
     }
 }
-struct RaycastResult {
-    hit: bool,
-    distance: f32,
-    entity: EntityType,
+struct KeepInBoundsSystem;
+impl KeepInBoundsSystem {
+    fn update(positions: &mut Vec<Vec2>) {
+        for pos in positions.iter_mut() {
+            if pos.x < 0.0 {
+                pos.x = 0.0;
+            }
+            if pos.x > ((WORLD_WIDTH - 1) as f32) {
+                pos.x = (WORLD_WIDTH - 1) as f32;
+            }
+            if pos.y < 0.0 {
+                pos.y = 0.0;
+            }
+            if pos.y > ((WORLD_HEIGHT - 1) as f32) {
+                pos.y = (WORLD_HEIGHT - 1) as f32;
+            }
+        }
+    }
+    fn update_player(position: &mut Vec2) {
+        if position.x < 0.0 {
+            position.x = 0.0;
+        }
+        if position.x > ((WORLD_WIDTH - 1) as f32) {
+            position.x = (WORLD_WIDTH - 1) as f32;
+        }
+        if position.y < 0.0 {
+            position.y = 0.0;
+        }
+        if position.y > ((WORLD_HEIGHT - 1) as f32) {
+            position.y = (WORLD_HEIGHT - 1) as f32;
+        }
+    }
+}
+struct WallCollisionSystem;
+impl WallCollisionSystem {
+    fn update(positions: &mut Vec<Vec2>, walls: &Vec<Vec2>) {
+        for pos in positions.iter_mut() {
+            for wall in walls.iter() {
+                let point_1 = Vec2::new(wall.x + 0.5, wall.y + 0.5);
+                let point_2 = Vec2::new(pos.x - 0.5, pos.y - 0.5);
+                let distance = point_1.distance(point_2);
+                if distance < 0.5 {
+                    let normal = (point_2 - point_1).normalize();
+                    *pos += normal * (0.5 - distance);
+                }
+            }
+        }
+    }
+    fn update_player(position: &mut Vec2, walls: &Vec<Vec2>) {
+        for wall in walls.iter() {
+            let point_1 = Vec2::new(wall.x + 0.5, wall.y + 0.5);
+            let point_2 = Vec2::new(position.x + 0.5, position.y + 0.5);
+
+            let distance_x = (point_2.x - point_1.x).abs();
+            let distance_y = (point_2.y - point_1.y).abs();
+
+            if distance_x <= 1.0 && distance_y <= 1.0 {
+                if distance_x > distance_y {
+                    let normal = Vec2::new(point_2.x - point_1.x, 0.0).normalize();
+                    *position += normal * (1.0 - distance_x);
+                } else {
+                    let normal = Vec2::new(0.0, point_2.y - point_1.y).normalize();
+                    *position += normal * (1.0 - distance_y);
+                }
+            }
+        }
+    }
 }
 struct RaycastSystem;
 impl RaycastSystem {
-    fn update(origin: Vec2, angle: f32, map: &Vec<Vec<EntityType>>, rays: usize, max_distance: usize) -> Vec<RaycastResult> {
-        let mut results: Vec<RaycastResult> = Vec::new();
-        let mut pos = origin;
-        let mut angle = angle;
-        let steps = angle / rays as f32;
-        for i in 0..rays {
-            let current_angle = angle + (steps * i as f32);
-            let mut distance = 0.0;
-            let mut hit = false;
-            let mut entity = EntityType::None;
-            todo!();
+    fn raycast_and_visualize_tiles_traversed(
+        ctx: &mut dyn RenderingBackend,
+        renderer: &RectangleRenderSystem,
+        origin: Vec2,
+        angle: f32,
+        rays: usize,
+        max_tiles: usize,
+        map: &[[EntityType; WORLD_WIDTH as usize]; WORLD_HEIGHT as usize]
+    ) -> Vec<RaycastResult> {
+        let mut res: Vec<RaycastResult> = Vec::new();
+        const MAX_ANGLE: f32 = PI / 6.0;
+        let angle_step_size = MAX_ANGLE / (rays as f32);
+        let half_rays = rays / 2;
+        const EPSILON: f32 = 1e-6;
+        for ray_idx in 0..rays {
+            let curr_angle =
+                angle - (half_rays as f32) * angle_step_size + (ray_idx as f32) * angle_step_size;
+            let mut curr_pos = origin;
+            let direction = Vec2::new(curr_angle.cos() + EPSILON, curr_angle.sin() + EPSILON);
+            for curr_tile in 0..max_tiles {
+                let curr_tiles = curr_pos.round();
+                if
+                    curr_tiles.x < 0.0 ||
+                    curr_tiles.x >= (WORLD_WIDTH as f32) ||
+                    curr_tiles.y < 0.0 ||
+                    curr_tiles.y >= (WORLD_HEIGHT as f32)
+                {
+                    break;
+                }
+                let dist_to_x_edge = if direction.x > 0.0 {
+                    (curr_tiles.x + 1.0 - curr_pos.x) / direction.x
+                } else {
+                    (curr_pos.x - curr_tiles.x) / -direction.x
+                };
+                let dist_to_y_edge = if direction.y > 0.0 {
+                    (curr_tiles.y + 1.0 - curr_pos.y) / direction.y
+                } else {
+                    (curr_pos.y - curr_tiles.y) / -direction.y
+                };
+                if dist_to_x_edge < dist_to_y_edge {
+                    curr_pos += direction * dist_to_x_edge.max(1.0);
+                } else {
+                    curr_pos += direction * dist_to_y_edge.max(1.0);
+                }
+                let curr_tile = curr_pos.round();
+                renderer.render_rectangle(
+                    ctx,
+                    curr_tile,
+                    curr_tile + Vec2::new(1.0, 1.0),
+                    Vec4::new(1.0, 1.0, 0.0, 1.0)
+                );
+                match
+                    map
+                        .get(curr_tile.y.round() as usize)
+                        .expect("Invalid tile y idx into map")
+                        .get(curr_tile.x.round() as usize)
+                        .expect("Invalid tile x idx into map")
+                {
+                    EntityType::Wall => {
+                        res.push(RaycastResult {
+                            distance: curr_pos.distance(origin),
+                            entity_pos: curr_tile,
+                            entity: EntityType::Wall,
+                        });
+                        break;
+                    }
+                    EntityType::Enemy => {
+                        res.push(RaycastResult {
+                            distance: curr_pos.distance(origin),
+                            entity_pos: curr_tile,
+                            entity: EntityType::Enemy,
+                        });
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
-        return results;
-    }
-    fn visualize0() -> RenderData {
-        todo!()
+        return res;
     }
 }
+struct RaycastResult {
+    distance: f32,
+    entity_pos: Vec2,
+    entity: EntityType,
+}
+
 struct Enemies {
     positions: Vec<Vec2>,
     velocities: Vec<Vec2>,
     health: Vec<f32>,
-    render_data: Vec<RenderData>,
+    render_data: Vec<VertexRenderData>,
 }
 fn create_world_layout() -> [[EntityType; WORLD_WIDTH as usize]; WORLD_HEIGHT as usize] {
     let mut layout: [[EntityType; WORLD_WIDTH as usize]; WORLD_HEIGHT as usize] = [
@@ -186,8 +332,7 @@ fn create_world_layout() -> [[EntityType; WORLD_WIDTH as usize]; WORLD_HEIGHT as
                 y == (WORLD_HEIGHT as usize) - 1
             {
                 layout[y][x] = EntityType::Wall;
-            }
-            else if x == y {
+            } else if x == y {
                 layout[y][x] = EntityType::Wall;
             }
         }
@@ -196,7 +341,6 @@ fn create_world_layout() -> [[EntityType; WORLD_WIDTH as usize]; WORLD_HEIGHT as
 }
 struct Walls {
     positions: Vec<Vec2>,
-    render_datas: Vec<RenderData>,
 }
 struct World {
     player: Player,
@@ -215,60 +359,29 @@ impl World {
         };
         let mut walls = Walls {
             positions: Vec::new(),
-            render_datas: Vec::new(),
         };
 
-        for y in 0..WORLD_HEIGHT as usize {
-            for x in 0..WORLD_WIDTH as usize {
+        for y in 0..layout.len() {
+            for x in 0..layout[y].len() {
                 match layout[y][x] {
                     EntityType::Enemy => {
                         enemies.positions.push(Vec2::new(x as f32, y as f32));
                         enemies.velocities.push(Vec2::new(0.0, 0.0));
                         enemies.health.push(100.0);
-                        enemies.render_data.push(
-                            RenderDataCreator::render_data_for_rectangle(
-                                &mut *ctx,
-                                x,
-                                y,
-                                1,
-                                1,
-                                Vec4::new(0.0, 1.0, 0.0, 1.0)
-                            )
-                        );
                     }
                     EntityType::Wall => {
                         walls.positions.push(Vec2::new(x as f32, y as f32));
-                        walls.render_datas.push(
-                            RenderDataCreator::render_data_for_rectangle(
-                                &mut *ctx,
-                                x,
-                                y,
-                                1,
-                                1,
-                                Vec4::new(1.0, 0.0, 0.0, 1.0)
-                            )
-                        );
                     }
                     _ => {}
                 }
             }
         }
-        println!("Enemies: {}", enemies.positions.len());
-        println!("Walls: {}", walls.positions.len());
         Self {
             player: Player {
-                pos: Vec2::new((WORLD_WIDTH as f32) / 2.0, (WORLD_HEIGHT as f32) / 2.0),
+                pos: Vec2::new(2.0, 1.0),
                 vel: Vec2::new(0.0, 0.0),
                 angle: 0.0,
                 health: 100.0,
-                render_data: RenderDataCreator::render_data_for_rectangle(
-                    &mut *ctx,
-                    (WORLD_WIDTH as usize) / 2,
-                    (WORLD_HEIGHT as usize) / 2,
-                    1,
-                    1,
-                    Vec4::new(0.0, 0.0, 1.0, 1.0)
-                ),
             },
             map: layout,
             enemies,
@@ -278,6 +391,8 @@ impl World {
     fn update(&mut self) {
         MovementSystem::update(&mut self.enemies.positions, &mut self.enemies.velocities);
         self.player.pos += self.player.vel * PHYSICS_FRAME_TIME;
+        KeepInBoundsSystem::update_player(&mut self.player.pos);
+        WallCollisionSystem::update_player(&mut self.player.pos, &self.walls.positions);
     }
 }
 
@@ -289,6 +404,7 @@ struct Stage {
     draw_last_time: f64,
     pressed_keys: HashSet<KeyCode>,
     pipelines: Vec<Pipeline>,
+    render_system_rect: RectangleRenderSystem,
 }
 
 impl Stage {
@@ -305,7 +421,7 @@ impl Stage {
                     uniforms: UniformBlockLayout {
                         uniforms: vec![
                             UniformDesc::new("model", UniformType::Mat4),
-                            UniformDesc::new("screen_size", UniformType::Float2),
+                            UniformDesc::new("screen_size", UniformType::Float2)
                         ],
                     },
                     images: vec![],
@@ -326,7 +442,57 @@ impl Stage {
             default_shader,
             PipelineParams::default()
         );
+        let line_pipeline = ctx.new_pipeline(
+            &[
+                BufferLayout {
+                    stride: 24,
+                    ..Default::default()
+                },
+            ],
+            &[
+                VertexAttribute::new("pos", VertexFormat::Float2),
+                VertexAttribute::new("color0", VertexFormat::Float4),
+            ],
+            default_shader,
+            PipelineParams {
+                primitive_type: miniquad::PrimitiveType::Lines,
+                ..Default::default()
+            }
+        );
+        let rectangle_shader = ctx
+            .new_shader(
+                ShaderSource::Glsl {
+                    vertex: include_str!("./shaders/rectangle_vertex.glsl"),
+                    fragment: include_str!("./shaders/fragment.glsl"),
+                },
+                ShaderMeta {
+                    uniforms: UniformBlockLayout {
+                        uniforms: vec![
+                            UniformDesc::new("model", UniformType::Mat4),
+                            UniformDesc::new("screen_size", UniformType::Float2),
+                            UniformDesc::new("rect_color", UniformType::Float4)
+                        ],
+                    },
+                    images: vec![],
+                }
+            )
+            .expect("Failed to create shader");
+        let rectangle_pipeline = ctx.new_pipeline(
+            &[
+                BufferLayout {
+                    stride: 8,
+                    ..Default::default()
+                },
+            ],
+            &[VertexAttribute::new("pos", VertexFormat::Float2)],
+            rectangle_shader,
+            PipelineParams {
+                primitive_type: miniquad::PrimitiveType::Triangles,
+                ..Default::default()
+            }
+        );
         let world = World::default(&mut *ctx);
+        let render_system_rect = RectangleRenderSystem::new(&mut *ctx);
         Self {
             world,
             ctx,
@@ -334,7 +500,8 @@ impl Stage {
             physics_last_time: date::now(),
             draw_last_time: date::now(),
             pressed_keys: HashSet::new(),
-            pipelines: vec![default_pipeline],
+            pipelines: vec![default_pipeline, line_pipeline, rectangle_pipeline],
+            render_system_rect,
         }
     }
     fn calculate_velocity(pressed_keys: &HashSet<KeyCode>) -> Vec2 {
@@ -364,12 +531,7 @@ impl EventHandler for Stage {
         self.physics_last_time = date::now();
 
         while self.physics_elapsed_time >= PHYSICS_FRAME_TIME {
-            // let start = date::now();
             self.world.update();
-            // let end = date::now();
-            // println!("Physics update took: {}", end - start);
-            // println!("FPS: {}", 1.0 / (end - start));
-            // println!("Asteroids: {}", self.world.asteroids.positions.len());
             self.physics_elapsed_time -= PHYSICS_FRAME_TIME;
         }
     }
@@ -377,32 +539,46 @@ impl EventHandler for Stage {
         self.ctx.clear(Some((0.0, 0.0, 0.0, 1.0)), None, None);
         let dt = (date::now() - self.draw_last_time) as f32;
         self.draw_last_time = date::now();
+
         match self.ctx.info().backend {
             Backend::OpenGl => {
-                // self.ctx.begin_default_pass(Default::default());
-                RenderMapSystem::render(
+                self.ctx.apply_pipeline(&self.pipelines[2]);
+                for wall in &self.world.walls.positions {
+                    self.render_system_rect.render_rectangle(
+                        &mut *self.ctx,
+                        *wall,
+                        *wall + Vec2::new(1.0, 1.0),
+                        Vec4::new(1.0, 0.0, 0.0, 1.0)
+                    );
+                }
+
+                self.render_system_rect.render_rectangle(
                     &mut *self.ctx,
-                    &self.world.enemies.positions,
-                    &self.world.enemies.render_data,
-                    &self.pipelines
+                    self.world.player.pos,
+                    self.world.player.pos + Vec2::new(1.0, 1.0),
+                    Vec4::new(0.0, 0.0, 1.0, 1.0)
                 );
 
-                RenderMapSystem::render(
+                let res = RaycastSystem::raycast_and_visualize_tiles_traversed(
                     &mut *self.ctx,
-                    &vec![self.world.player.pos],
-                    &vec![self.world.player.render_data.clone()],
-                    &self.pipelines
+                    &self.render_system_rect,
+                    self.world.player.pos,
+                    self.world.player.angle,
+                    1,
+                    5,
+                    &self.world.map
                 );
-
-                RenderMapSystem::render(
-                    &mut *self.ctx,
-                    &self.world.walls.positions,
-                    &self.world.walls.render_datas,
-                    &self.pipelines
-                );
-
-                // self.ctx.end_render_pass();
-                // self.ctx.commit_frame();
+                if res.len() > 0 {
+                    println!("Raycast hit: {:?}", res[0].entity_pos);
+                    self.render_system_rect.render_rectangle(
+                        &mut *self.ctx,
+                        res[0].entity_pos,
+                        res[0].entity_pos + Vec2::new(1.0, 1.0),
+                        Vec4::new(0.0, 1.0, 0.0, 1.0)
+                    );
+                } else {
+                    println!("Raycast hit: None");
+                }
             }
             _ => {}
         }
@@ -410,17 +586,17 @@ impl EventHandler for Stage {
     }
     fn key_down_event(&mut self, keycode: KeyCode, _keymods: KeyMods, _repeat: bool) {
         self.pressed_keys.insert(keycode);
-        self.world.player.vel = Self::calculate_velocity(&self.pressed_keys) * 100.0;
-        self.world.player.angle = self.world.player.vel.y.atan2(self.world.player.vel.x);
+        self.world.player.vel = Self::calculate_velocity(&self.pressed_keys);
     }
 
     fn key_up_event(&mut self, keycode: KeyCode, _keymods: KeyMods) {
         self.pressed_keys.remove(&keycode);
-        self.world.player.vel = Self::calculate_velocity(&self.pressed_keys) * 100.0;
-        self.world.player.angle = self.world.player.vel.y.atan2(self.world.player.vel.x);
+        self.world.player.vel = Self::calculate_velocity(&self.pressed_keys);
     }
 
-    fn mouse_motion_event(&mut self, x: f32, y: f32) {}
+    fn mouse_motion_event(&mut self, x: f32, y: f32) {
+        self.world.player.angle = 0.33 * 2.0 * PI;
+    }
     fn mouse_button_down_event(&mut self, _button: MouseButton, _x: f32, _y: f32) {}
 }
 fn main() {
