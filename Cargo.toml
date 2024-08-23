@@ -4,5 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-miniquad = "0.4.5"
-glam = "0.29.0"
+macroquad = "0.4.12"
