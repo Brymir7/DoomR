@@ -20,10 +20,8 @@ pub mod config {
     pub const PHYSICS_FRAME_TIME: f32 = 1.0 / 60.0;
     pub const TILE_SIZE_X_PIXEL: usize = SCREEN_WIDTH / WORLD_WIDTH;
     pub const TILE_SIZE_Y_PIXEL: usize = SCREEN_HEIGHT / WORLD_HEIGHT;
-    pub const PLAYER_VIEW_ANGLE: f32 = PI / 3.0;
+    pub const PLAYER_FOV: f32 = PI / 2.0;
     pub const MAX_VIEW_DISTANCE: usize = WORLD_WIDTH;
-    pub const NUM_RAYS: usize = 128;
-    pub const RAY_PROJECTED_X_SCALE: f32 = SCREEN_WIDTH as f32 / NUM_RAYS as f32;
     pub const MAP_X_OFFSET: f32 = SCREEN_WIDTH as f32 * 0.75;
     pub const MAP_Y_OFFSET: f32 =  SCREEN_HEIGHT as f32 * 0.25;
 }

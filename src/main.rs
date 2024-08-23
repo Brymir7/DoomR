@@ -1,6 +1,15 @@
 use core::panic;
-use std::f32::consts::PI;
-use config::config::{ HALF_SCREEN_HEIGHT, HALF_SCREEN_WIDTH, MAP_X_OFFSET, PHYSICS_FRAME_TIME, SCREEN_WIDTH, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_WIDTH };
+use std::{ cmp::Ordering, f32::consts::PI, thread::sleep, time::Duration };
+use config::config::{
+    HALF_SCREEN_HEIGHT,
+    HALF_SCREEN_WIDTH,
+    MAP_X_OFFSET,
+    PHYSICS_FRAME_TIME,
+    SCREEN_WIDTH,
+    TILE_SIZE_Y_PIXEL,
+    WORLD_HEIGHT,
+    WORLD_WIDTH,
+};
 use macroquad::prelude::*;
 pub mod config;
 
@@ -78,16 +87,14 @@ impl RaycastSystem {
     fn raycast(
         origin: Vec2,
         player_angle: f32,
-        rays: u8,
         tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) -> Vec<RaycastResult> {
         let mut results = Vec::new();
-        for i in 0..rays {
-            let angle =
-                player_angle -
-                config::config::PLAYER_VIEW_ANGLE / 2.0 +
-                ((i as f32) * config::config::PLAYER_VIEW_ANGLE) / (rays as f32);
-            if let Some(result) = RaycastSystem::daa_raycast(origin, angle, tile_map) {
+        for i in 0..SCREEN_WIDTH {
+            let ray_angle = player_angle + config::config::PLAYER_FOV / 2.0 -
+                (i as f32 / SCREEN_WIDTH as f32) * config::config::PLAYER_FOV;
+
+            if let Some(result) = RaycastSystem::daa_raycast(origin, ray_angle, tile_map) {
                 results.push(result);
             }
         }
@@ -103,44 +110,47 @@ impl RaycastSystem {
         let relative_tile_dist_y = 1.0 / direction.y.abs();
         let step_x: isize = if direction.x > 0.0 { 1 } else { -1 };
         let step_y: isize = if direction.y > 0.0 { 1 } else { -1 };
-        let mut dist_side_x =
-            (if direction.x < 0.0 {
-                origin.x.trunc() - origin.x
-            } else {
-                1.0 + origin.x.trunc() - origin.x
-            }) * relative_tile_dist_x;
-        let mut dist_side_y =
-            (if direction.y < 0.0 {
-                origin.y - origin.y.trunc()
-            } else {
-                1.0 + origin.y - origin.y.trunc()
-            }) * relative_tile_dist_y;
+
         let mut curr_map_tile_x = origin.x.trunc() as usize;
         let mut curr_map_tile_y = origin.y.trunc() as usize;
+        let mut dist_side_x = if direction.x < 0.0 {
+            (origin.x - curr_map_tile_x as f32) * relative_tile_dist_x
+        } else {
+            (curr_map_tile_x as f32 + 1.0 - origin.x) * relative_tile_dist_x
+        };
+        let mut dist_side_y = if direction.y < 0.0 {
+            (origin.y - curr_map_tile_y as f32) * relative_tile_dist_y
+        } else {
+            (curr_map_tile_y as f32 + 1.0 - origin.y) * relative_tile_dist_y
+        };
         while
-            curr_map_tile_x >= 0 && 
-            curr_map_tile_x < WORLD_WIDTH &&
-            curr_map_tile_y <= WORLD_HEIGHT &&
-            curr_map_tile_y >= 0 
+            curr_map_tile_x < WORLD_WIDTH && // assume it hits a wall before reaching the end of the map
+            curr_map_tile_y <= WORLD_HEIGHT
         {
             let is_x_side = dist_side_x < dist_side_y;
             if is_x_side {
+                assert!(curr_map_tile_x > 0);
                 dist_side_x += relative_tile_dist_x;
                 curr_map_tile_x = ((curr_map_tile_x as isize) + step_x) as usize;
             } else {
+                assert!(curr_map_tile_y > 0);
                 dist_side_y += relative_tile_dist_y;
                 curr_map_tile_y = ((curr_map_tile_y as isize) + step_y) as usize;
             }
 
             if tile_map[curr_map_tile_y][curr_map_tile_x] == EntityType::Wall {
                 let distance = if is_x_side {
-                    dist_side_x - relative_tile_dist_x*2.0
+                    dist_side_x - relative_tile_dist_x
                 } else {
-                    dist_side_y - relative_tile_dist_y  * 2.0
+                    dist_side_y - relative_tile_dist_y
                 };
                 return Some(RaycastResult {
                     distance,
                     entity_pos: Vec2::new(curr_map_tile_x as f32, curr_map_tile_y as f32),
+                    intersection_pos: Vec2::new(
+                        origin.x + direction.x * distance,
+                        origin.y + direction.y * distance
+                    ),
                     entity: EntityType::Wall,
                 });
             }
@@ -178,15 +188,23 @@ impl RenderMap {
             BLUE
         );
     }
-    fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastResult>){
+    fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastResult>) {
         for result in raycast_result.iter() {
             draw_line(
                 player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
                 player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                result.entity_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
+                result.entity_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                    MAP_X_OFFSET,
                 result.entity_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
                 1.0,
                 WHITE
+            );
+            draw_circle(
+                result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                    MAP_X_OFFSET,
+                result.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                2.0,
+                WHITE,
             );
         }
     }
@@ -195,15 +213,19 @@ struct RenderPlayerPOV;
 impl RenderPlayerPOV {
     fn render(raycast_result: &Vec<RaycastResult>) {
         for (i, result) in raycast_result.iter().enumerate() {
-            let wall_height = (TILE_SIZE_Y_PIXEL as f32 / result.distance).min(HALF_SCREEN_HEIGHT);
+            let wall_height = ((TILE_SIZE_Y_PIXEL as f32) / result.distance).min(
+                HALF_SCREEN_HEIGHT
+            );
             let wall_color = match result.entity {
                 EntityType::Wall => GREEN,
                 _ => WHITE,
             };
+            let shade = 1.0 - (result.distance / WORLD_WIDTH.max(WORLD_HEIGHT) as f32).clamp(0.0, 1.0);
+            let wall_color = Color::new(wall_color.r * shade, wall_color.g * shade, wall_color.b * shade, 1.0);
             draw_rectangle(
-                (i as f32) * config::config::RAY_PROJECTED_X_SCALE,
+                (i as f32) * 1.0,
                 config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
-                config::config::RAY_PROJECTED_X_SCALE,
+                1.0,
                 wall_height,
                 wall_color
             );
@@ -213,6 +235,7 @@ impl RenderPlayerPOV {
 struct RaycastResult {
     distance: f32,
     entity_pos: Vec2,
+    intersection_pos: Vec2,
     entity: EntityType,
 }
 struct World {
@@ -280,7 +303,6 @@ impl World {
         let raycast_results = RaycastSystem::raycast(
             player_ray_origin,
             self.player.angle,
-            config::config::NUM_RAYS as u8,
             &self.world_layout
         );
         RenderMap::render_world_layout(&self.world_layout);
