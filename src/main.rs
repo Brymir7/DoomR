@@ -1,14 +1,7 @@
 use core::panic;
 use std::{ cmp::Ordering, f32::consts::PI, thread::sleep, time::Duration };
 use config::config::{
-    HALF_SCREEN_HEIGHT,
-    HALF_SCREEN_WIDTH,
-    MAP_X_OFFSET,
-    PHYSICS_FRAME_TIME,
-    SCREEN_WIDTH,
-    TILE_SIZE_Y_PIXEL,
-    WORLD_HEIGHT,
-    WORLD_WIDTH,
+    HALF_SCREEN_HEIGHT, HALF_SCREEN_WIDTH, MAP_X_OFFSET, PHYSICS_FRAME_TIME, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_WIDTH
 };
 use macroquad::prelude::*;
 pub mod config;
@@ -146,11 +139,11 @@ impl RaycastSystem {
                 };
                 return Some(RaycastResult {
                     distance,
-                    entity_pos: Vec2::new(curr_map_tile_x as f32, curr_map_tile_y as f32),
                     intersection_pos: Vec2::new(
                         origin.x + direction.x * distance,
                         origin.y + direction.y * distance
                     ),
+                    hit_from_x_side: is_x_side,
                     entity: EntityType::Wall,
                 });
             }
@@ -193,9 +186,9 @@ impl RenderMap {
             draw_line(
                 player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
                 player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                result.entity_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
                     MAP_X_OFFSET,
-                result.entity_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                result.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
                 1.0,
                 WHITE
             );
@@ -213,15 +206,20 @@ struct RenderPlayerPOV;
 impl RenderPlayerPOV {
     fn render(raycast_result: &Vec<RaycastResult>) {
         for (i, result) in raycast_result.iter().enumerate() {
-            let wall_height = ((TILE_SIZE_Y_PIXEL as f32) / result.distance).min(
-                HALF_SCREEN_HEIGHT
-            );
+            let  wall_height = (SCREEN_HEIGHT as f32 / (result.distance - 0.5 + 0.000001)  ).min(
+                    SCREEN_HEIGHT as f32 * 0.8
+                );
             let wall_color = match result.entity {
                 EntityType::Wall => GREEN,
                 _ => WHITE,
             };
             let shade = 1.0 - (result.distance / WORLD_WIDTH.max(WORLD_HEIGHT) as f32).clamp(0.0, 1.0);
             let wall_color = Color::new(wall_color.r * shade, wall_color.g * shade, wall_color.b * shade, 1.0);
+            let wall_color = if result.hit_from_x_side {
+                wall_color 
+            } else {
+                Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
+            };
             draw_rectangle(
                 (i as f32) * 1.0,
                 config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
@@ -234,7 +232,7 @@ impl RenderPlayerPOV {
 }
 struct RaycastResult {
     distance: f32,
-    entity_pos: Vec2,
+    hit_from_x_side: bool,
     intersection_pos: Vec2,
     entity: EntityType,
 }
@@ -300,11 +298,15 @@ impl World {
     }
     fn draw(&self) {
         let player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
+        let start_time = get_time();
         let raycast_results = RaycastSystem::raycast(
             player_ray_origin,
             self.player.angle,
             &self.world_layout
         );
+        let end_time = get_time();
+        let elapsed_time = end_time - start_time;
+        draw_text(&format!("Raycasting FPS: {}", 1.0/ elapsed_time),  10.0, 30.0, 20.0, RED);
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_on_map(self.player.pos);
         RenderMap::render_rays(player_ray_origin, &raycast_results);
@@ -324,7 +326,7 @@ async fn main() {
             elapsed_time = 0.0;
         }
         world.draw();
-        draw_text(&format!("FPS: {}", get_fps()), 10.0, 10.0, 20.0, WHITE);
+        draw_text(&format!("FPS: {}", 1.0 / get_frame_time()), 10.0, 10.0, 20.0, WHITE);
         next_frame().await;
     }
 }
