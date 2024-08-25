@@ -23,7 +23,9 @@ use config::config::{
 };
 use once_cell::sync::Lazy;
 use macroquad::{ color, prelude::*, text };
+use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
+pub mod shaders;
 #[derive(Hash, Eq, PartialEq, Copy, Clone)]
 enum Textures {
     Stone,
@@ -240,66 +242,33 @@ impl RenderMap {
 }
 struct RenderPlayerPOV;
 impl RenderPlayerPOV {
-    fn render_floor(
-        player_angle: f32,
-        player_pos: Vec2,
-        floor_layout: &[[Textures; WORLD_WIDTH]; WORLD_HEIGHT],
-    ) {
-        
+    fn render_floor(material: &Material, player_angle: f32, player_pos: Vec2) {
         const HALF_PLAYER_FOV: f32 = PLAYER_FOV / 2.0;
         let left_most_ray_dir = Vec2::new(
             (player_angle - HALF_PLAYER_FOV).cos(),
-            (player_angle - HALF_PLAYER_FOV).sin(),
+            (player_angle - HALF_PLAYER_FOV).sin()
         );
         let right_most_ray_dir = Vec2::new(
             (player_angle + HALF_PLAYER_FOV).cos(),
-            (player_angle + HALF_PLAYER_FOV).sin(),
+            (player_angle + HALF_PLAYER_FOV).sin()
         );
-    
-        let floor_step = (right_most_ray_dir - left_most_ray_dir) / SCREEN_WIDTH as f32;
-        for row in HALF_SCREEN_HEIGHT as usize..SCREEN_HEIGHT {
-            let row_distance = HALF_SCREEN_HEIGHT / (row as f32 - HALF_SCREEN_HEIGHT).max(0.01); // near  screen middle the distance approaches infinity 
-            let floor_ray = left_most_ray_dir * row_distance;
-            let mut floor_pos = player_pos + floor_ray;
-            for col in 0..SCREEN_WIDTH {
-                let floor_tile_pos = floor_pos.as_uvec2();
-    
-                if let Some(&texture_type) = floor_layout
-                    .get(floor_tile_pos.y as usize)
-                    .and_then(|row| row.get(floor_tile_pos.x as usize))
-                {
-                    if let Some(texture) = TEXTURE_TYPE_TO_TEXTURE2D.get(&texture_type) {
-                        let texture_coords = Vec2::new(
-                            floor_pos.x.fract() * texture.width() as f32,
-                            floor_pos.y.fract() * texture.height() as f32,
-                        );
-    
-                        // Apply distance-based shading
-                        let shade = (1.0 - (row_distance / 100.0)).clamp(0.0, 1.0);
-                        let color = Color::new(shade, shade, shade, 1.0);
-    
-                        draw_texture_ex(
-                            texture,
-                            col as f32,
-                            row as f32,
-                            color,
-                            DrawTextureParams {
-                                source: Some(Rect::new(
-                                    texture_coords.x,
-                                    texture_coords.y,
-                                    1.0,
-                                    1.0,
-                                )),
-                                ..Default::default()
-                            },
-                        );
-                    }
-                }
-                floor_pos += floor_step * row_distance;
-            }
-        }
+        material.set_uniform("u_player_pos", player_pos);
+        material.set_uniform("u_left_ray_dir", left_most_ray_dir);
+        material.set_uniform("u_right_ray_dir", right_most_ray_dir);
+        material.set_uniform("u_half_screen_height", HALF_SCREEN_HEIGHT as f32);
+        material.set_uniform("u_screen_width", SCREEN_WIDTH as f32);
+        material.set_uniform("u_screen_height", SCREEN_HEIGHT as f32);
+        material.set_texture(
+            "u_floor_texture",
+            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Stone)
+                .expect("Couldnt load stone texture")
+                .clone()
+        );
+        gl_use_material(&material);
+        draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32,  SCREEN_HEIGHT as f32, Color::from_rgba(255, 255, 255, 255));
+        gl_use_default_material();
     }
-    
+
     fn render_world(raycast_result: &Vec<RaycastResult>) {
         for (i, result) in raycast_result.iter().enumerate() {
             let wall_height = ((SCREEN_HEIGHT as f32) / (result.distance - 0.5 + 0.000001)).min(
@@ -342,6 +311,7 @@ struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
     floor_layout: [[Textures; WORLD_WIDTH]; WORLD_HEIGHT],
     roof_layout: [[Textures; WORLD_WIDTH]; WORLD_HEIGHT],
+    background_material: Material,
     walls: Vec<Vec2>,
     player: Player,
 }
@@ -376,10 +346,53 @@ impl World {
         }
         let floor_layout = [[Textures::Stone; WORLD_WIDTH]; WORLD_HEIGHT];
         let roof_layout = [[Textures::Stone; WORLD_WIDTH]; WORLD_HEIGHT];
+        let material = load_material(
+            ShaderSource::Glsl {
+                vertex: &DEFAULT_VERTEX_SHADER,
+                fragment: &FLOOR_FRAGMENT_SHADER,
+            },
+            MaterialParams {
+                uniforms: vec![
+                    UniformDesc {
+                        name: "u_player_pos".to_string(),
+                        uniform_type: UniformType::Float2,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "u_left_ray_dir".to_string(),
+                        uniform_type: UniformType::Float2,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "u_right_ray_dir".to_string(),
+                        uniform_type: UniformType::Float2,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "u_half_screen_height".to_string(),
+                        uniform_type: UniformType::Float1,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "u_screen_width".to_string(),
+                        uniform_type: UniformType::Float1,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "u_screen_height".to_string(),
+                        uniform_type: UniformType::Float1,
+                        array_count: 1,
+                    }
+                ],
+                textures: vec!["u_floor_texture".to_string()],
+                ..Default::default()
+            }
+        ).unwrap();
         Self {
             world_layout,
             floor_layout,
             roof_layout,
+            background_material: material,
             walls,
             player,
         }
@@ -415,7 +428,12 @@ impl World {
         );
         let end_time = get_time();
         let elapsed_time = end_time - start_time;
-        RenderPlayerPOV::render_floor(self.player.angle, player_ray_origin, &self.floor_layout);
+
+        RenderPlayerPOV::render_floor(
+            &self.background_material,
+            self.player.angle,
+            player_ray_origin
+        );
         RenderPlayerPOV::render_world(&raycast_results);
 
         RenderMap::render_world_layout(&self.world_layout);
