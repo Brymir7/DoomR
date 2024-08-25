@@ -265,7 +265,22 @@ impl RenderPlayerPOV {
                 .clone()
         );
         gl_use_material(&material);
-        draw_rectangle(0.0, 0.0, SCREEN_WIDTH as f32,  SCREEN_HEIGHT as f32, Color::from_rgba(255, 255, 255, 255));
+        material.set_uniform("is_ceiling", 1.0 as f32);
+        draw_rectangle(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HALF_SCREEN_HEIGHT as f32,
+            Color::from_rgba(255, 255, 255, 255)
+        );
+        material.set_uniform("is_ceiling", -1.0 as f32);
+        draw_rectangle(
+            0.0,
+            HALF_SCREEN_HEIGHT,
+            SCREEN_WIDTH as f32,
+            HALF_SCREEN_HEIGHT as f32,
+            Color::from_rgba(255, 255, 255, 255)
+        );
         gl_use_default_material();
     }
 
@@ -380,6 +395,11 @@ impl World {
                     },
                     UniformDesc {
                         name: "u_screen_height".to_string(),
+                        uniform_type: UniformType::Float1,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "is_ceiling".to_string(),
                         uniform_type: UniformType::Float1,
                         array_count: 1,
                     }
