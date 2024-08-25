@@ -664,21 +664,25 @@ impl World {
             player,
         }
     }
-    fn kill_enemy(&mut self, enemy_tile: Tile) {
-        let enemy_handle: EntityType = self.world_layout[enemy_tile.y as usize][enemy_tile.x as usize];
-        match enemy_handle {
-            EntityType::Enemy(idx) => {
-                self.enemies.destroy_enemy(idx);
-            }
-            _ => panic!("Invalid entity at tile"),
-        }
+    fn kill_enemy(&mut self, enemy_tile: Tile, enemy_idx: u8) {
+        self.enemies.destroy_enemy(enemy_idx);
         self.world_layout[enemy_tile.y as usize][enemy_tile.x as usize] = EntityType::None;
 
     }
     fn handle_game_event(&mut self, event: WorldEvent) {
         match event.event_type {
             WorldEventType::PlayerHitEnemy => {
-                self.kill_enemy(event.target_tile_handle)
+                let enemy_handle: EntityType = self.world_layout[event.target_tile_handle.y as usize][event.target_tile_handle.x as usize];
+                match enemy_handle {
+                    EntityType::Enemy(idx) => {
+                        let health = self.enemies.healths.get_mut(idx as usize).expect("Invalid handle in world layout");
+                        *health -= 1;
+                        if *health == 0 {
+                            self.kill_enemy(event.target_tile_handle, idx);
+                        }
+                    }
+                    _ => panic!("Hit invalid enemy")
+                }
             }
             _ => panic!("Unahndled game event")
         }
