@@ -76,15 +76,15 @@ impl Tile {
 }
 struct WorldEvent {
     event_type: WorldEventType,
-    triggered_by_layout_handle: Tile,
-    target_layout_handle: Tile,
+    triggered_by_tile_handle: Tile,
+    target_tile_handle: Tile,
 }
 impl WorldEvent {
     fn player_hit_enemy(player_handle: Tile, enemy_handle: Tile) -> Self {
         return WorldEvent {
             event_type: WorldEventType::PlayerHitEnemy,
-            triggered_by_layout_handle: player_handle,
-            target_layout_handle: enemy_handle,
+            triggered_by_tile_handle: player_handle,
+            target_tile_handle: enemy_handle,
         };
     }
 }
@@ -108,6 +108,12 @@ struct Enemies {
     velocities: Vec<Vec2>,
     healths: Vec<u8>,
 }
+struct EnemyInformation {
+    pos: Vec2,
+    angle: f32,
+    vel: Vec2,
+    health: u8,
+}
 impl Enemies {
     fn new_enemy(&mut self, pos: Vec2, angle: f32, velocity: Vec2, health: u8) -> usize {
         self.positions.push(pos);
@@ -115,6 +121,21 @@ impl Enemies {
         self.velocities.push(velocity);
         self.healths.push(health);
         return self.positions.len();
+    }
+    fn destroy_enemy(&mut self, idx: u8) {
+        self.positions.swap_remove(idx as usize);
+        self.angles.swap_remove(idx as usize);
+        self.velocities.swap_remove(idx as usize);
+        self.healths.swap_remove(idx as usize);
+    }
+    fn get_enemy_information(&self, idx: u8) -> EnemyInformation {
+        let idx = idx as usize;
+        EnemyInformation {
+            pos: *self.positions.get(idx).expect("Tried to acccess invalid enemy idx"),
+            angle: *self.angles.get(idx).expect("Tried to acccess invalid enemy idx"),
+            vel: *self.velocities.get(idx).expect("Tried to acccess invalid enemy idx"),
+            health: *self.healths.get(idx).expect("Tried to acccess invalid enemy idx"),
+        }
     }
 }
 struct Player {
@@ -369,17 +390,20 @@ impl RenderMap {
             BLUE
         );
     }
-    fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastResult>) {
+    fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastStepResult>) {
         for result in raycast_result.iter() {
-            draw_line(
-                player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
-                player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-                    MAP_X_OFFSET,
-                result.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                1.0,
-                WHITE
-            );
+            if let Some(block) = &result.block {
+                draw_line(
+                    player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                        MAP_X_OFFSET,
+                    player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                    block.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                        MAP_X_OFFSET,
+                    block.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                    1.0,
+                    WHITE
+                );
+            }
             // draw_circle(
             //     result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
             //         MAP_X_OFFSET,
@@ -436,7 +460,7 @@ impl RenderPlayerPOV {
 
     fn render_world(
         player_origin: Vec2,
-        raycast_step_res: Vec<RaycastStepResult>,
+        raycast_step_res: &Vec<RaycastStepResult>,
         enemies_positions: &Vec<Vec2>
     ) {
         for (i, result) in raycast_step_res.iter().enumerate() {
@@ -479,9 +503,10 @@ impl RenderPlayerPOV {
                     EntityType::Enemy(_) => RED,
                     _ => panic!("Non enemy block"),
                 };
-                let wall_height = ((SCREEN_HEIGHT as f32) / ((enemy.distance * 1.5) - 0.5 + 0.000001)).min(
-                    SCREEN_HEIGHT as f32
-                );
+                let wall_height = (
+                    (SCREEN_HEIGHT as f32) /
+                    (enemy.distance * 1.5 - 0.5 + 0.000001)
+                ).min(SCREEN_HEIGHT as f32);
                 let shade =
                     1.0 - (enemy.distance / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
                 let wall_color = Color::new(
@@ -503,7 +528,6 @@ impl RenderPlayerPOV {
                     wall_color
                 );
             }
-
         }
     }
     fn render_weapon() {
@@ -640,6 +664,26 @@ impl World {
             player,
         }
     }
+    fn kill_enemy(&mut self, enemy_tile: Tile) {
+        let enemy_handle: EntityType = self.world_layout[enemy_tile.y as usize][enemy_tile.x as usize];
+        match enemy_handle {
+            EntityType::Enemy(idx) => {
+                self.enemies.destroy_enemy(idx);
+            }
+            _ => panic!("Invalid entity at tile"),
+        }
+        self.world_layout[enemy_tile.y as usize][enemy_tile.x as usize] = EntityType::None;
+
+    }
+    fn handle_game_event(&mut self, event: WorldEvent) {
+        match event.event_type {
+            WorldEventType::PlayerHitEnemy => {
+                self.kill_enemy(event.target_tile_handle)
+            }
+            _ => panic!("Unahndled game event")
+        }
+
+    }
     fn handle_input(&mut self) {
         if is_key_down(KeyCode::W) {
             self.player.vel = Vec2::new(self.player.angle.cos(), self.player.angle.sin());
@@ -655,8 +699,12 @@ impl World {
             self.player.angle += 0.75 * get_frame_time();
         }
         if is_key_pressed(KeyCode::Space) {
-            self.player.shoot(self.world_layout);
-        }
+            let game_event = self.player.shoot(self.world_layout);
+            if let Some(event) = game_event {
+                println!("Hit something");
+                self.handle_game_event(event);
+            }
+        }   
     }
 
     fn update(&mut self) {
@@ -688,15 +736,11 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
-        RenderPlayerPOV::render_world(
-            self.player.pos,
-            raycast_result,
-            &self.enemies.positions
-        );
+        RenderPlayerPOV::render_world(self.player.pos, &raycast_result, &self.enemies.positions);
         RenderPlayerPOV::render_weapon();
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_on_map(self.player.pos);
-        // RenderMap::render_rays(player_ray_origin, &raycast_result);
+        RenderMap::render_rays(player_ray_origin, &raycast_result);
         draw_text(&format!("Raycasting FPS: {}", 1.0 / elapsed_time), 10.0, 30.0, 20.0, RED);
     }
 }
