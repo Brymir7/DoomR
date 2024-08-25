@@ -1,34 +1,26 @@
 use core::panic;
-use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    f32::consts::PI,
-    ops::Range,
-    thread::sleep,
-    time::Duration,
-};
+use std::collections::HashMap;
 use config::config::{
     HALF_SCREEN_HEIGHT,
-    HALF_SCREEN_WIDTH,
     MAP_X_OFFSET,
-    MAP_Y_OFFSET,
     PHYSICS_FRAME_TIME,
     PLAYER_FOV,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
-    TILE_SIZE_X_PIXEL,
-    TILE_SIZE_Y_PIXEL,
     WORLD_HEIGHT,
     WORLD_WIDTH,
 };
+use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
-use macroquad::{ color, prelude::*, text };
+use macroquad::prelude::*;
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
+pub mod image_utils;
 #[derive(Hash, Eq, PartialEq, Copy, Clone)]
 enum Textures {
     Stone,
+    Weapon,
 }
 
 static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new(|| {
@@ -36,9 +28,13 @@ static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new
     map.insert(
         Textures::Stone,
         Texture2D::from_file_with_format(
-            include_bytes!("textures/stone.png"),
+            include_bytes!("../textures/stone.png"),
             Some(ImageFormat::Png)
         )
+    );
+    map.insert(
+        Textures::Weapon,
+        load_and_convert_texture(include_bytes!("../textures/weapon.png"), ImageFormat::Png)
     );
     map
 });
@@ -59,21 +55,142 @@ enum EntityType {
     Player,
     Wall,
     None,
+    Enemy(u8),
+}
+enum WorldEventType {
+    PlayerHitEnemy,
+    EnemyHitPlayer,
+}
+#[derive(PartialEq)]
+struct Tile {
+    x: u8,
+    y: u8,
+}
+impl Tile {
+    fn from_vec2(pos: Vec2) -> Self {
+        return Tile {
+            x: pos.x.trunc() as u8,
+            y: pos.y.trunc() as u8,
+        };
+    }
+}
+struct WorldEvent {
+    event_type: WorldEventType,
+    triggered_by_layout_handle: Tile,
+    target_layout_handle: Tile,
+}
+impl WorldEvent {
+    fn player_hit_enemy(player_handle: Tile, enemy_handle: Tile) -> Self {
+        return WorldEvent {
+            event_type: WorldEventType::PlayerHitEnemy,
+            triggered_by_layout_handle: player_handle,
+            target_layout_handle: enemy_handle,
+        };
+    }
+}
+// struct AnimationSystem;
+
+// impl AnimationSystem {
+//     fn play_explosion(x: f32, y: f32, radius: f32) {
+//         for i in 0..16 {
+//             let angle = ((i as f32) * (std::f32::consts::PI * 2.0)) / 16.0;
+//             let dx = radius * angle.cos();
+//             let dy = radius * angle.sin();
+//             let w = radius / 8.0;
+//             let h = radius / 8.0;
+//             draw_rectangle(x + dx, y + dy, w, h, Color::from_rgba(255, 128, 0, 255));
+//         }
+//     }
+// }
+struct Enemies {
+    positions: Vec<Vec2>,
+    angles: Vec<f32>,
+    velocities: Vec<Vec2>,
+    healths: Vec<u8>,
+}
+impl Enemies {
+    fn new_enemy(&mut self, pos: Vec2, angle: f32, velocity: Vec2, health: u8) -> usize {
+        self.positions.push(pos);
+        self.angles.push(angle);
+        self.velocities.push(velocity);
+        self.healths.push(health);
+        return self.positions.len()
+    }
 }
 struct Player {
     pos: Vec2,
     angle: f32,
     vel: Vec2,
+    health: u8,
+}
+impl Player {
+    fn shoot(&self, world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) -> Option<WorldEvent> {
+        let result = RaycastSystem::daa_raycast(self.pos, self.angle, &world_layout);
+        match result {
+            Some(object_hit) => {
+                match object_hit.entity {
+                    EntityType::Enemy(_) => {
+                        if object_hit.distance > 5.0 {
+                            return None;
+                        }
+                        return Some(
+                            WorldEvent::player_hit_enemy(
+                                Tile::from_vec2(self.pos),
+                                Tile::from_vec2(object_hit.intersection_pos)
+                            )
+                        );
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
 }
 struct MovementSystem;
 impl MovementSystem {
-    fn update(positions: &mut Vec<Vec2>, velocities: &Vec<f32>) {
-        for (pos, vel) in positions.iter_mut().zip(velocities.iter()) {
-            pos.x += vel * PHYSICS_FRAME_TIME;
+    fn update(
+        positions: &mut Vec<Vec2>,
+        velocities: &Vec<Vec2>,
+        entity_type: EntityType,
+        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+    ) {
+        for ((i, pos), vel) in positions.iter_mut().enumerate().zip(velocities.iter()) {
+            let prev_tile = Tile::from_vec2(*pos);
+            pos.x += vel.x * PHYSICS_FRAME_TIME;
+            pos.y += vel.y * PHYSICS_FRAME_TIME;
+            let new_tile = Tile::from_vec2(*pos);
+            match entity_type {
+                EntityType::Enemy(_) => {
+                    world_layout[new_tile.y as usize][new_tile.y as usize] = EntityType::Enemy(i as u8);
+                }
+                _ => {
+                    panic!("Do not use update function except for enemies atm!");
+                }
+            }
+            if prev_tile != new_tile {
+                assert!(match world_layout[prev_tile.y as usize][prev_tile.y as usize] {
+                    EntityType::Enemy(_) => {
+                        true
+                    },
+                    _ => {false}});
+                world_layout[prev_tile.y as usize][prev_tile.y as usize] = EntityType::None;
+            }
         }
     }
-    fn update_player(player: &mut Player) {
+    fn update_player(
+        player: &mut Player,
+        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+    ) {
+        let prev_tile = Tile::from_vec2(player.pos);
         player.pos += player.vel * PHYSICS_FRAME_TIME;
+        let new_tile = Tile::from_vec2(player.pos);
+        world_layout[new_tile.y as usize][new_tile.y as usize] = EntityType::Player;
+        if prev_tile != new_tile {
+            assert!(world_layout[prev_tile.y as usize][prev_tile.y as usize] == EntityType::Player);
+            world_layout[prev_tile.y as usize][prev_tile.y as usize] = EntityType::None;
+        }
     }
 }
 struct WallCollisionSystem;
@@ -192,6 +309,7 @@ impl RaycastSystem {
 struct RenderMap;
 impl RenderMap {
     fn render_world_layout(world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) {
+        draw_rectangle(MAP_X_OFFSET, 0.0, SCREEN_WIDTH as f32-MAP_X_OFFSET, 270.0, GRAY);
         for y in 0..WORLD_HEIGHT {
             for x in 0..WORLD_WIDTH {
                 match world_layout[y][x] {
@@ -291,6 +409,7 @@ impl RenderPlayerPOV {
             );
             let wall_color = match result.entity {
                 EntityType::Wall => GREEN,
+                EntityType::Enemy(_) => RED,
                 _ => WHITE,
             };
             let shade =
@@ -315,6 +434,23 @@ impl RenderPlayerPOV {
             );
         }
     }
+    fn render_weapon() {
+        let weapon_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Weapon).expect(
+            "Failed to load weapon sprite"
+        );
+        draw_texture_ex(
+            weapon_texture,
+            (SCREEN_WIDTH as f32) * 0.5 - weapon_texture.width() * 0.5,
+            (SCREEN_HEIGHT as f32) * 0.85 - weapon_texture.height(),
+            Color::from_rgba(255, 255, 255, 255),
+            DrawTextureParams {
+                dest_size: Some(
+                    Vec2::new(weapon_texture.width() * 2.0, weapon_texture.height() * 2.0)
+                ),
+                ..Default::default()
+            }
+        )
+    }
 }
 struct RaycastResult {
     distance: f32,
@@ -324,43 +460,52 @@ struct RaycastResult {
 }
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
-    floor_layout: [[Textures; WORLD_WIDTH]; WORLD_HEIGHT],
-    roof_layout: [[Textures; WORLD_WIDTH]; WORLD_HEIGHT],
     background_material: Material,
     walls: Vec<Vec2>,
+    enemies: Enemies,
     player: Player,
 }
 impl World {
     fn default() -> Self {
         let mut walls = Vec::new();
+        let mut enemies = Enemies {
+            angles: Vec::new(),
+            positions: Vec::new(),
+            velocities: Vec::new(),
+            healths: Vec::new(),
+        };
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
             angle: 0.0,
             vel: Vec2::new(0.0, 0.0),
+            health: 3,
         };
         let layout = config::config::WORLD_LAYOUT;
         let mut world_layout = [[EntityType::None; WORLD_WIDTH]; WORLD_HEIGHT];
         for y in 0..WORLD_HEIGHT {
             for x in 0..WORLD_WIDTH {
-                world_layout[y][x] = match layout[y][x] {
-                    0 => EntityType::None,
-                    1 => EntityType::Wall,
-                    2 => EntityType::Player,
+                match layout[y][x] {
+                    0 => world_layout[y][x] = EntityType::None,
+                    1 => {
+                        world_layout[y][x] = EntityType::Wall;
+                        walls.push(Vec2::new(x as f32, y as f32));
+                    }
+                    2 => {
+                        world_layout[y][x] = EntityType::Player;
+                        if player.pos != Vec2::ZERO {
+                            panic!("Multiple player entities in world layout");
+                        }
+                        player.pos = Vec2::new(x as f32, y as f32);
+                    }
+                    3 => {
+                        let handle = enemies.new_enemy(Vec2::new(x as f32, y as f32), 0.0, Vec2::new(1.0, 0.0), 1);
+                        world_layout[y][x] = EntityType::Enemy(handle as u8);
+                    },
                     _ => panic!("Invalid entity type in world layout"),
                 };
-                if layout[y][x] == 1 {
-                    walls.push(Vec2::new(x as f32, y as f32));
-                }
-                if layout[y][x] == 2 {
-                    if player.pos != Vec2::ZERO {
-                        panic!("Multiple player entities in world layout");
-                    }
-                    player.pos = Vec2::new(x as f32, y as f32);
-                }
             }
         }
-        let floor_layout = [[Textures::Stone; WORLD_WIDTH]; WORLD_HEIGHT];
-        let roof_layout = [[Textures::Stone; WORLD_WIDTH]; WORLD_HEIGHT];
+        
         let material = load_material(
             ShaderSource::Glsl {
                 vertex: &DEFAULT_VERTEX_SHADER,
@@ -410,10 +555,9 @@ impl World {
         ).unwrap();
         Self {
             world_layout,
-            floor_layout,
-            roof_layout,
             background_material: material,
             walls,
+            enemies,
             player,
         }
     }
@@ -426,15 +570,28 @@ impl World {
             self.player.vel = Vec2::new(0.0, 0.0);
         }
         if is_key_down(KeyCode::A) {
-            self.player.angle -= 0.1;
+            self.player.angle -= 0.75 * get_frame_time();
         }
         if is_key_down(KeyCode::D) {
-            self.player.angle += 0.1;
+            self.player.angle += 0.75 * get_frame_time();
+        }
+        if is_key_pressed(KeyCode::Space) {
+            self.player.shoot(self.world_layout);
         }
     }
 
     fn update(&mut self) {
-        MovementSystem::update_player(&mut self.player);
+        assert!(self.enemies.positions.len() < 255);
+        assert!(self.world_layout.len() < 255 && self.world_layout[0].len() < 255);
+        assert!(self.walls.len() < 255);
+        MovementSystem::update_player(&mut self.player, &mut self.world_layout);
+        MovementSystem::update(
+            &mut self.enemies.positions,
+            &self.enemies.velocities,
+            EntityType::Enemy(0),
+            &mut self.world_layout
+        );
+        WallCollisionSystem::update(&mut self.enemies.positions, &self.walls);
         WallCollisionSystem::update_player(&mut self.player.pos, &self.walls);
     }
     fn draw(&self) {
@@ -454,8 +611,9 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
+        println!("self.enemies.pos {}", self.enemies.positions[0]);
         RenderPlayerPOV::render_world(&raycast_results);
-
+        RenderPlayerPOV::render_weapon();
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_on_map(self.player.pos);
         RenderMap::render_rays(player_ray_origin, &raycast_results);
@@ -470,8 +628,8 @@ async fn main() {
     loop {
         clear_background(BLACK);
         elapsed_time += get_frame_time();
+        world.handle_input();
         if elapsed_time > PHYSICS_FRAME_TIME {
-            world.handle_input();
             world.update();
             elapsed_time = 0.0;
         }
