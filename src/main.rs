@@ -40,6 +40,7 @@ static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new
     );
     map
 });
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "DoomR".to_owned(),
@@ -464,7 +465,8 @@ impl RaycastSystem {
         if t_near <= t_far && t_far > 0.0 {
             let intersection = origin + direction * t_near;
             const EPSILON: f32 = 0.1;
-            if // might not be necessary
+            if
+                // might not be necessary
                 intersection.x >= enemy_pos.x - EPSILON &&
                 intersection.x <= enemy_pos.x + enemy_size.x + EPSILON &&
                 intersection.y >= enemy_pos.y - EPSILON &&
@@ -616,6 +618,9 @@ impl RenderPlayerPOV {
         enemies_positions: &Vec<Vec2>,
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) {
+        let block_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Stone).expect(
+            "Stone texture failed to initialize"
+        );
         for (i, result) in raycast_step_res.iter().enumerate() {
             if let Some(block) = &result.block {
                 let wall_color = match block.entity {
@@ -638,12 +643,23 @@ impl RenderPlayerPOV {
                 } else {
                     Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
                 };
-                draw_rectangle(
-                    (i as f32) * 1.0,
+                draw_texture_ex(
+                    block_texture,
+                    i as f32,
                     config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
-                    1.0,
-                    wall_height,
-                    wall_color
+                    wall_color,
+                    DrawTextureParams {
+                        source: {
+                            Some(Rect {
+                                x: (i as f32) % block_texture.width(),
+                                y: 0.0,
+                                w: 1.0,
+                                h: block_texture.height(),
+                            })
+                        },
+                        dest_size: Some(Vec2::new(1.0, wall_height)),
+                        ..Default::default()
+                    }
                 );
             }
             if let Some(enemy) = &result.enemy {
@@ -674,7 +690,7 @@ impl RenderPlayerPOV {
                     Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
                 };
                 draw_rectangle(
-                    (i as f32) * 1.0,
+                    i as f32,
                     config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
                     1.0,
                     wall_height,
@@ -821,7 +837,7 @@ impl World {
             player,
         }
     }
-    fn kill_enemy(&mut self,enemy_idx: u8) {
+    fn kill_enemy(&mut self, enemy_idx: u8) {
         println!("Killing enemy at idx {}", enemy_idx);
         let enemy_information = self.enemies.get_enemy_information(enemy_idx);
         let enemy_pos = enemy_information.pos;
@@ -830,7 +846,7 @@ impl World {
         let start_tile_y = enemy_pos.y.floor() as usize;
         let end_tile_x = (enemy_pos.x + enemy_size.x).ceil() as usize;
         let end_tile_y = (enemy_pos.y + enemy_size.y).ceil() as usize;
-        
+
         // Remove the enemy from all overlapping tiles
         for y in start_tile_y..end_tile_y {
             for x in start_tile_x..end_tile_x {
@@ -843,10 +859,9 @@ impl World {
                 }
             }
         }
-        
-        // Destroy the enemy in the enemies collection
         self.enemies.destroy_enemy(enemy_idx);
     }
+
     fn handle_game_event(&mut self, event: WorldEvent) {
         match event.event_type {
             WorldEventType::PlayerHitEnemy => {
