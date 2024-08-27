@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections::HashMap;
+use std::{ collections::HashMap, process::id };
 use config::config::{
     AMOUNT_OF_RAYS,
     HALF_SCREEN_HEIGHT,
@@ -118,20 +118,28 @@ impl WorldEvent {
         };
     }
 }
-// struct AnimationSystem;
-
-// impl AnimationSystem {
-//     fn play_explosion(x: f32, y: f32, radius: f32) {
-//         for i in 0..16 {
-//             let angle = ((i as f32) * (std::f32::consts::PI * 2.0)) / 16.0;
-//             let dx = radius * angle.cos();
-//             let dy = radius * angle.sin();
-//             let w = radius / 8.0;
-//             let h = radius / 8.0;
-//             draw_rectangle(x + dx, y + dy, w, h, Color::from_rgba(255, 128, 0, 255));
-//         }
-//     }
-// }
+#[derive(Clone, Copy)]
+enum AnimationCallbackEventType {
+    None,
+    KillEnemy,
+}
+#[derive(Clone, Copy)]
+struct AnimationCallbackEvent {
+    event_type: AnimationCallbackEventType,
+    target_handle: u8,
+}
+impl AnimationCallbackEvent {
+    fn none() -> Self {
+        AnimationCallbackEvent {
+            event_type: AnimationCallbackEventType::None,
+            target_handle: 0,
+        }
+    }
+}
+struct AnimationSprite {
+    source: Rect, // what to sample from spritesheet
+    color: Color,
+}
 #[derive(Clone)]
 struct AnimationState {
     frame: u8,
@@ -139,8 +147,10 @@ struct AnimationState {
     spritesheet_offset_per_frame: Vec2,
     animation_type: EnemyAnimationType,
     sprite_sheet: Texture2D,
-    ms_per_update: f32,
+    color: Color,
+    physics_frames_per_update: f32,
     elapsed_time: f32,
+    callback_event: AnimationCallbackEvent,
 }
 impl AnimationState {
     fn default_skeleton() -> Self {
@@ -154,25 +164,48 @@ impl AnimationState {
             frames_amount: 3,
             spritesheet_offset_per_frame: Vec2::new(single_sprite_dimension_x, 0.0),
             sprite_sheet: texture.clone(),
+            color: WHITE,
             animation_type: EnemyAnimationType::SkeletonFront,
-            ms_per_update: 0.3,
+            physics_frames_per_update: 20.0 * PHYSICS_FRAME_TIME,
             elapsed_time: 0.0,
+            callback_event: AnimationCallbackEvent::none(),
         }
     }
-    fn next(&mut self, dt: f32) {
+    fn set_physics_frames_per_update(&mut self, frames: f32) {
+        self.physics_frames_per_update = frames * PHYSICS_FRAME_TIME;
+    }
+    fn reset_frames(&mut self) {
+        self.frame = 0;
+        self.elapsed_time = 0.0;
+    }
+    fn set_callback(&mut self, callback: AnimationCallbackEvent) {
+        self.callback_event = callback;
+        self.reset_frames();
+    }
+    fn next(&mut self, dt: f32) -> AnimationCallbackEvent {
+        assert!(self.physics_frames_per_update >= dt);
         self.elapsed_time += dt;
-        if self.elapsed_time > self.ms_per_update {
+        let mut callback_event = AnimationCallbackEvent::none();
+        if self.elapsed_time > self.physics_frames_per_update {
+            if self.frame == self.frames_amount - 1 {
+                callback_event = self.callback_event;
+                println!("Returning callback to kill");
+            }
             self.frame = (self.frame + 1) % self.frames_amount;
             self.elapsed_time = 0.0;
         }
+        return callback_event;
     }
-    fn get_current_sprite_source(&self) -> Rect {
+    fn get_current_sprite_source(&self) -> AnimationSprite {
         let current_frames_offset = (self.frame as f32) * self.spritesheet_offset_per_frame;
-        return Rect {
-            x: current_frames_offset.x,
-            y: current_frames_offset.y,
-            w: self.spritesheet_offset_per_frame.x,
-            h: self.spritesheet_offset_per_frame.y,
+        return AnimationSprite {
+            source: Rect {
+                x: current_frames_offset.x,
+                y: current_frames_offset.y,
+                w: self.spritesheet_offset_per_frame.x,
+                h: self.spritesheet_offset_per_frame.y,
+            },
+            color: self.color,
         };
     }
     fn change_animation(
@@ -206,14 +239,16 @@ impl UpdateEnemyAnimation {
         enemy_positions: &Vec<Vec2>,
         velocities: &Vec<Vec2>,
         animation_states: &mut Vec<AnimationState>
-    ) {
+    ) -> Vec<AnimationCallbackEvent> {
+        let mut res: Vec<AnimationCallbackEvent> = Vec::new();
         for ((&enemy_pos, &velocity), animation_state) in enemy_positions
             .iter()
             .zip(velocities.iter())
             .zip(animation_states.iter_mut()) {
             let to_player = player_origin - enemy_pos;
             let enemy_angle = velocity.angle_between(to_player);
-            animation_state.next(PHYSICS_FRAME_TIME);
+            let callback_event = animation_state.next(PHYSICS_FRAME_TIME);
+            res.push(callback_event);
             match enemy_angle.abs() {
                 angle if angle < std::f32::consts::FRAC_PI_4 => {
                     if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
@@ -250,9 +285,48 @@ impl UpdateEnemyAnimation {
                 }
             };
         }
+        res
     }
 }
+struct CallbackHandler;
+impl CallbackHandler {
+    fn handle_animation_callbacks(
+        callbacks: Vec<AnimationCallbackEvent>,
+        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        enemies: &mut Enemies
+    ) {
+        for callback in callbacks {
+            match callback.event_type {
+                AnimationCallbackEventType::KillEnemy => {
+                    let enemy_idx = callback.target_handle;
+                    let mut enemy_information = enemies.get_enemy_information(enemy_idx);
+                    enemy_information.animation_state.animation_type =
+                        EnemyAnimationType::SkeletonBack;
+                    let enemy_pos = enemy_information.pos;
+                    let enemy_size = enemy_information.size;
+                    let start_tile_x = enemy_pos.x.floor() as usize;
+                    let start_tile_y = enemy_pos.y.floor() as usize;
+                    let end_tile_x = (enemy_pos.x + enemy_size.x).ceil() as usize;
+                    let end_tile_y = (enemy_pos.y + enemy_size.y).ceil() as usize;
 
+                    for y in start_tile_y..end_tile_y {
+                        for x in start_tile_x..end_tile_x {
+                            if y < world_layout.len() && x < world_layout[y].len() {
+                                if let EntityType::Enemy(id) = world_layout[y][x] {
+                                    if id == enemy_idx {
+                                        world_layout[y][x] = EntityType::None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    enemies.destroy_enemy(enemy_idx);
+                }
+                AnimationCallbackEventType::None => {}
+            }
+        }
+    }
+}
 struct Enemies {
     positions: Vec<Vec2>,
     velocities: Vec<Vec2>,
@@ -261,6 +335,7 @@ struct Enemies {
     animation_states: Vec<AnimationState>,
 }
 struct EnemyInformation {
+    idx: u8,
     pos: Vec2,
     vel: Vec2,
     health: u8,
@@ -292,6 +367,7 @@ impl Enemies {
         let idx = idx as usize;
         println!("{}, len enemies {}", idx, self.positions.len());
         EnemyInformation {
+            idx: idx as u8,
             pos: *self.positions.get(idx).expect("Tried to acccess invalid enemy idx"),
             vel: *self.velocities.get(idx).expect("Tried to acccess invalid enemy idx"),
             health: *self.healths.get(idx).expect("Tried to acccess invalid enemy idx"),
@@ -301,6 +377,19 @@ impl Enemies {
                 .expect("Tried to acccess invalid enemy idx")
                 .clone(),
         }
+    }
+    fn update_based_on_enemy_information(&mut self, enemy_information: EnemyInformation) {
+        let idx = enemy_information.idx as usize;
+        *self.positions.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.pos;
+        *self.velocities.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.vel;
+        *self.healths.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.health;
+        *self.sizes.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.size;
+        *self.animation_states.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.animation_state;
     }
 }
 struct Player {
@@ -315,31 +404,38 @@ impl Player {
         world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemies: &Enemies
     ) -> Option<WorldEvent> {
-        let result = RaycastSystem::daa_raycast(self.pos, self.angle, &world_layout, enemies);
-        // ADD PLAYER SHOOT ANGLE BASED ON POV, A SINGLE RAY MAKES IT FEEL BAD
-        match result.enemy {
-            Some(object_hit) => {
-                match object_hit.entity {
-                    EntityType::Enemy(_) => {
-                        if object_hit.distance > 5.0 {
-                            return None;
+        const RAY_SPREAD: f32 = PLAYER_FOV / 2.0 / 10.0; // basically defines the hitbox of the player shooting
+        let angles = [self.angle - RAY_SPREAD, self.angle, self.angle + RAY_SPREAD];
+
+        for &angle in &angles {
+            let result = RaycastSystem::daa_raycast(self.pos, angle, &world_layout, enemies);
+
+            match result.enemy {
+                Some(object_hit) => {
+                    match object_hit.entity {
+                        EntityType::Enemy(_) => {
+                            if object_hit.distance <= 5.0 {
+                                // defines max distance to be able to shoot
+                                return Some(
+                                    WorldEvent::player_hit_enemy(
+                                        Tile::from_vec2(self.pos),
+                                        Tile::from_vec2(object_hit.intersection_pos)
+                                    )
+                                );
+                            }
                         }
-                        return Some(
-                            WorldEvent::player_hit_enemy(
-                                Tile::from_vec2(self.pos),
-                                Tile::from_vec2(object_hit.intersection_pos)
-                            )
-                        );
+                        _ => {}
                     }
-                    _ => None,
                 }
+                _ => {}
             }
-            _ => None,
         }
+
+        None
     }
 }
-struct MovementSystem;
 
+struct MovementSystem;
 impl MovementSystem {
     fn update_enemies(
         enemies: &mut Enemies,
@@ -358,15 +454,10 @@ impl MovementSystem {
             pos.y += vel.y * PHYSICS_FRAME_TIME;
 
             Self::resolve_wall_collisions(pos, walls);
-
             let new_tiles = Self::get_occupied_tiles(*pos, *size);
-
-            // Remove enemy from previous tiles
             for tile in prev_tiles {
                 world_layout[tile.y as usize][tile.x as usize] = EntityType::None;
             }
-
-            // Add enemy to new tiles
             for tile in new_tiles {
                 world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(id as u8);
             }
@@ -479,15 +570,18 @@ impl RaycastSystem {
         } else {
             ((curr_map_tile_y as f32) + 1.0 - origin.y) * relative_tile_dist_y
         };
-        loop {
+        while
+            curr_map_tile_x > 0 &&
+            curr_map_tile_x < WORLD_WIDTH &&
+            curr_map_tile_y > 0 &&
+            curr_map_tile_y < WORLD_HEIGHT
+        {
             // assume it hits a wall due to level design
             let is_x_side = dist_side_x < dist_side_y;
             if is_x_side {
-                assert!(curr_map_tile_x > 0);
                 dist_side_x += relative_tile_dist_x;
                 curr_map_tile_x = ((curr_map_tile_x as isize) + step_x) as usize;
             } else {
-                assert!(curr_map_tile_y > 0);
                 dist_side_y += relative_tile_dist_y;
                 curr_map_tile_y = ((curr_map_tile_y as isize) + step_y) as usize;
             }
@@ -813,11 +907,16 @@ impl RenderPlayerPOV {
                         0.0,
                         1.0
                     );
-                let sprite_color = Color::new(shade, shade, shade, 1.0);
-                let curr_spritesheet_source_rect =
-                    enemy_animation_state.get_current_sprite_source();
+                let sprite_source_and_color = enemy_animation_state.get_current_sprite_source();
+                let sprite_color = Color::new(
+                    sprite_source_and_color.color.r * shade,
+                    sprite_source_and_color.color.g * shade,
+                    sprite_source_and_color.color.b * shade,
+                    1.0
+                );
+
                 let source_rect = Rect {
-                    x: curr_spritesheet_source_rect.x + text_coord_x,
+                    x: sprite_source_and_color.source.x + text_coord_x,
                     y: 0.0,
                     w: 1.0,
                     h: enemy_animation_state.spritesheet_offset_per_frame.y,
@@ -974,30 +1073,6 @@ impl World {
             player,
         }
     }
-    fn kill_enemy(&mut self, enemy_idx: u8) {
-        println!("Killing enemy at idx {}", enemy_idx);
-        let enemy_information = self.enemies.get_enemy_information(enemy_idx);
-        let enemy_pos = enemy_information.pos;
-        let enemy_size = enemy_information.size;
-        let start_tile_x = enemy_pos.x.floor() as usize;
-        let start_tile_y = enemy_pos.y.floor() as usize;
-        let end_tile_x = (enemy_pos.x + enemy_size.x).ceil() as usize;
-        let end_tile_y = (enemy_pos.y + enemy_size.y).ceil() as usize;
-
-        // Remove the enemy from all overlapping tiles
-        for y in start_tile_y..end_tile_y {
-            for x in start_tile_x..end_tile_x {
-                if y < self.world_layout.len() && x < self.world_layout[y].len() {
-                    if let EntityType::Enemy(id) = self.world_layout[y][x] {
-                        if id == enemy_idx {
-                            self.world_layout[y][x] = EntityType::None;
-                        }
-                    }
-                }
-            }
-        }
-        self.enemies.destroy_enemy(enemy_idx);
-    }
 
     fn handle_game_event(&mut self, event: WorldEvent) {
         match event.event_type {
@@ -1010,9 +1085,20 @@ impl World {
                         let health = self.enemies.healths
                             .get_mut(idx as usize)
                             .expect("Invalid handle in world layout");
+                        if *health == 0 {
+                            // avoid rescheduling animation callback
+                            return;
+                        }
                         *health -= 1;
                         if *health == 0 {
-                            self.kill_enemy(idx);
+                            let enemy_animation_state =
+                                &mut self.enemies.animation_states[idx as usize];
+                            enemy_animation_state.set_callback(AnimationCallbackEvent {
+                                event_type: AnimationCallbackEventType::KillEnemy,
+                                target_handle: idx,
+                            });
+                            enemy_animation_state.set_physics_frames_per_update(20.0);
+                            enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
                         }
                     }
                     _ => panic!("Hit invalid enemy"),
@@ -1049,12 +1135,17 @@ impl World {
         assert!(self.walls.len() < 255);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
         MovementSystem::update_enemies(&mut self.enemies, &self.walls, &mut self.world_layout);
-        UpdateEnemyAnimation::update(
+        let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             self.player.angle,
             &self.enemies.positions,
             &self.enemies.velocities,
             &mut self.enemies.animation_states
+        );
+        CallbackHandler::handle_animation_callbacks(
+            animation_callback_events,
+            &mut self.world_layout,
+            &mut self.enemies
         );
     }
     fn draw(&self) {
