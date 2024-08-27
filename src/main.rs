@@ -1,5 +1,5 @@
 use core::panic;
-use std::{ collections::HashMap, process::id };
+use std::{ collections::HashMap, process::id, time::Duration };
 use config::config::{
     AMOUNT_OF_RAYS,
     HALF_SCREEN_HEIGHT,
@@ -83,9 +83,9 @@ fn window_conf() -> Conf {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum EntityType {
     Player,
-    Wall(u8),
+    Wall(u16),
     None,
-    Enemy(u8),
+    Enemy(u16),
 }
 enum WorldEventType {
     PlayerHitEnemy,
@@ -93,14 +93,14 @@ enum WorldEventType {
 }
 #[derive(PartialEq, Clone, Copy)]
 struct Tile {
-    x: u8,
-    y: u8,
+    x: u16,
+    y: u16,
 }
 impl Tile {
     fn from_vec2(pos: Vec2) -> Self {
         return Tile {
-            x: pos.x.round() as u8,
-            y: pos.y.round() as u8,
+            x: pos.x.round() as u16,
+            y: pos.y.round() as u16,
         };
     }
 }
@@ -126,7 +126,7 @@ enum AnimationCallbackEventType {
 #[derive(Clone, Copy)]
 struct AnimationCallbackEvent {
     event_type: AnimationCallbackEventType,
-    target_handle: u8,
+    target_handle: u16,
 }
 impl AnimationCallbackEvent {
     fn none() -> Self {
@@ -142,8 +142,8 @@ struct AnimationSprite {
 }
 #[derive(Clone)]
 struct AnimationState {
-    frame: u8,
-    frames_amount: u8,
+    frame: u16,
+    frames_amount: u16,
     spritesheet_offset_per_frame: Vec2,
     animation_type: EnemyAnimationType,
     sprite_sheet: Texture2D,
@@ -157,7 +157,7 @@ impl AnimationState {
         let texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet).expect(
             "Failed to load Skeleton Front Spritesheet"
         );
-        const FRAMES_AMOUNT: u8 = 3;
+        const FRAMES_AMOUNT: u16 = 3;
         let single_sprite_dimension_x = texture.width() / (FRAMES_AMOUNT as f32);
         AnimationState {
             frame: 0,
@@ -189,7 +189,6 @@ impl AnimationState {
         if self.elapsed_time > self.physics_frames_per_update {
             if self.frame == self.frames_amount - 1 {
                 callback_event = self.callback_event;
-                println!("Returning callback to kill");
             }
             self.frame = (self.frame + 1) % self.frames_amount;
             self.elapsed_time = 0.0;
@@ -215,7 +214,7 @@ impl AnimationState {
         single_sprite_dimensions: Vec2
     ) {
         self.frame = 0;
-        self.frames_amount = (new_spritesheet.width() / single_sprite_dimensions.x).trunc() as u8;
+        self.frames_amount = (new_spritesheet.width() / single_sprite_dimensions.x).trunc() as u16;
         self.spritesheet_offset_per_frame = Vec2::new(
             single_sprite_dimensions.x,
             single_sprite_dimensions.y
@@ -327,47 +326,84 @@ impl CallbackHandler {
         }
     }
 }
-struct Enemies {
-    positions: Vec<Vec2>,
-    velocities: Vec<Vec2>,
-    healths: Vec<u8>,
-    sizes: Vec<Vec2>,
-    animation_states: Vec<AnimationState>,
+
+struct CollisionData {
+    x_collisions: Vec<u32>,
+    y_collisions: Vec<u32>,
+    collision_times: Vec<Duration>,
+}
+
+impl CollisionData {
+    fn new(enemy_count: usize) -> Self {
+        CollisionData {
+            x_collisions: vec![0; enemy_count],
+            y_collisions: vec![0; enemy_count],
+            collision_times: vec![Duration::from_secs(0); enemy_count],
+        }
+    }
 }
 struct EnemyInformation {
-    idx: u8,
+    idx: u16,
     pos: Vec2,
     vel: Vec2,
-    health: u8,
+    health: u16,
     size: Vec2,
     animation_state: AnimationState,
 }
+struct Enemies {
+    positions: Vec<Vec2>,
+    velocities: Vec<Vec2>,
+    healths: Vec<u16>,
+    sizes: Vec<Vec2>,
+    animation_states: Vec<AnimationState>,
+    collision_data: CollisionData,
+}
+
 impl Enemies {
+    fn new() -> Self {
+        Enemies {
+            positions: Vec::new(),
+            velocities: Vec::new(),
+            healths: Vec::new(),
+            sizes: Vec::new(),
+            animation_states: Vec::new(),
+            collision_data: CollisionData::new(0),
+        }
+    }
+
     fn new_enemy(
         &mut self,
         pos: Vec2,
         velocity: Vec2,
-        health: u8,
+        health: u16,
         size: Vec2,
         animation: AnimationState
     ) -> usize {
+        let index = self.positions.len();
         self.positions.push(pos);
         self.velocities.push(velocity);
         self.healths.push(health);
         self.sizes.push(size);
         self.animation_states.push(animation);
-        return self.positions.len() - 1;
+        self.collision_data.x_collisions.push(0);
+        self.collision_data.y_collisions.push(0);
+        self.collision_data.collision_times.push(Duration::from_secs(0));
+        index
     }
-    fn destroy_enemy(&mut self, idx: u8) {
+    fn destroy_enemy(&mut self, idx: u16) {
         self.positions.swap_remove(idx as usize);
         self.velocities.swap_remove(idx as usize);
         self.healths.swap_remove(idx as usize);
+        self.sizes.swap_remove(idx as usize);
+        self.animation_states.swap_remove(idx as usize);
+        self.collision_data.x_collisions.swap_remove(idx as usize);
+        self.collision_data.y_collisions.swap_remove(idx as usize);
+        self.collision_data.collision_times.swap_remove(idx as usize);
     }
-    fn get_enemy_information(&self, idx: u8) -> EnemyInformation {
+    fn get_enemy_information(&self, idx: u16) -> EnemyInformation {
         let idx = idx as usize;
-        println!("{}, len enemies {}", idx, self.positions.len());
         EnemyInformation {
-            idx: idx as u8,
+            idx: idx as u16,
             pos: *self.positions.get(idx).expect("Tried to acccess invalid enemy idx"),
             vel: *self.velocities.get(idx).expect("Tried to acccess invalid enemy idx"),
             health: *self.healths.get(idx).expect("Tried to acccess invalid enemy idx"),
@@ -396,7 +432,7 @@ struct Player {
     pos: Vec2,
     angle: f32,
     vel: Vec2,
-    health: u8,
+    health: u16,
 }
 impl Player {
     fn shoot(
@@ -440,36 +476,92 @@ impl MovementSystem {
     fn update_enemies(
         enemies: &mut Enemies,
         walls: &Vec<Vec2>,
-        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        current_time: Duration,
     ) {
-        for (id, (pos_and_vel, size)) in enemies.positions
-            .iter_mut()
-            .zip(enemies.velocities.iter())
-            .zip(enemies.sizes.iter())
-            .enumerate() {
-            let pos = pos_and_vel.0;
-            let vel = pos_and_vel.1;
-            let prev_tiles = Self::get_occupied_tiles(*pos, *size);
-            pos.x += vel.x * PHYSICS_FRAME_TIME;
-            pos.y += vel.y * PHYSICS_FRAME_TIME;
+        const COLLISION_THRESHOLD: u32 = 5;
+        const COLLISION_TIME_WINDOW: Duration = Duration::from_secs(2);
 
-            Self::resolve_wall_collisions(pos, walls);
+        for (id, ((pos, vel), size)) in enemies.positions.iter_mut()
+            .zip(enemies.velocities.iter_mut())
+            .zip(enemies.sizes.iter())
+            .enumerate()
+        {
+            let prev_tiles = Self::get_occupied_tiles(*pos, *size);
+            let mut new_pos = *pos + *vel * PHYSICS_FRAME_TIME;
+            
+            let (collided_x, collided_y) = Self::resolve_wall_collisions(&mut new_pos, walls, *pos);
+
+            if collided_x {
+                enemies.collision_data.x_collisions[id] += 1;
+            }
+            if collided_y {
+                enemies.collision_data.y_collisions[id] += 1;
+            }
+
+            if collided_x || collided_y {
+                enemies.collision_data.collision_times[id] = current_time;
+            }
+
+            let time_since_last_collision = current_time - enemies.collision_data.collision_times[id];
+
+            if time_since_last_collision <= COLLISION_TIME_WINDOW {
+                if enemies.collision_data.x_collisions[id] >= COLLISION_THRESHOLD {
+                    vel.x *= -1.0;
+                    enemies.collision_data.x_collisions[id] = 0;
+                }
+                if enemies.collision_data.y_collisions[id] >= COLLISION_THRESHOLD {
+                    vel.y *= -1.0;
+                    enemies.collision_data.y_collisions[id] = 0;
+                }
+            } else {
+                enemies.collision_data.x_collisions[id] = 0;
+                enemies.collision_data.y_collisions[id] = 0;
+            }
+
+            *pos = new_pos;
+
             let new_tiles = Self::get_occupied_tiles(*pos, *size);
             for tile in prev_tiles {
                 world_layout[tile.y as usize][tile.x as usize] = EntityType::None;
             }
             for tile in new_tiles {
-                world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(id as u8);
+                world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(id as u16);
             }
         }
     }
 
+    fn resolve_wall_collisions(position: &mut Vec2, walls: &Vec<Vec2>, old_position: Vec2) -> (bool, bool) {
+        let mut collided_x = false;
+        let mut collided_y = false;
+
+        for wall in walls.iter() {
+            let point_1 = Vec2::new(wall.x + 0.5, wall.y + 0.5);
+            let point_2 = Vec2::new(position.x + 0.5, position.y + 0.5);
+
+            let distance_x = (point_2.x - point_1.x).abs();
+            let distance_y = (point_2.y - point_1.y).abs();
+
+            if distance_x < 1.0 && distance_y < 1.0 {
+                if distance_x > distance_y {
+                    position.x = old_position.x;
+                    collided_x = true;
+                } else {
+                    position.y = old_position.y;
+                    collided_y = true;
+                }
+            }
+        }
+
+        (collided_x, collided_y)
+    }
+
     fn get_occupied_tiles(pos: Vec2, size: Vec2) -> Vec<Tile> {
         let mut tiles = Vec::new();
-        let start_x = pos.x.floor() as u8;
-        let start_y = pos.y.floor() as u8;
-        let end_x = (pos.x + size.x - 0.01).floor() as u8;
-        let end_y = (pos.y + size.y - 0.01).floor() as u8;
+        let start_x = pos.x.floor() as u16;
+        let start_y = pos.y.floor() as u16;
+        let end_x = (pos.x + size.x - 0.01).floor() as u16;
+        let end_y = (pos.y + size.y - 0.01).floor() as u16;
 
         for y in start_y..=end_y {
             for x in start_x..=end_x {
@@ -486,7 +578,7 @@ impl MovementSystem {
     ) {
         let prev_tile = Tile::from_vec2(player.pos);
         player.pos += player.vel * PHYSICS_FRAME_TIME;
-        Self::resolve_wall_collisions(&mut player.pos, walls);
+        Self::player_resolve_wall_collisions(&mut player.pos, walls);
         let new_tile = Tile::from_vec2(player.pos);
         world_layout[new_tile.y as usize][new_tile.x as usize] = EntityType::Player;
         if prev_tile != new_tile {
@@ -495,7 +587,7 @@ impl MovementSystem {
         }
     }
 
-    fn resolve_wall_collisions(position: &mut Vec2, walls: &Vec<Vec2>) {
+    fn player_resolve_wall_collisions(position: &mut Vec2, walls: &Vec<Vec2>) {
         for wall in walls.iter() {
             let point_1 = Vec2::new(wall.x + 0.5, wall.y + 0.5);
             let point_2 = Vec2::new(position.x + 0.5, position.y + 0.5);
@@ -602,8 +694,8 @@ impl RaycastSystem {
                         hit_from_x_side: is_x_side,
                         entity: EntityType::Wall(handle),
                         map_idx: Tile {
-                            x: curr_map_tile_x as u8,
-                            y: curr_map_tile_y as u8,
+                            x: curr_map_tile_x as u16,
+                            y: curr_map_tile_y as u16,
                         },
                     });
                     break;
@@ -630,8 +722,8 @@ impl RaycastSystem {
                                 hit_from_x_side: is_x_side,
                                 entity: EntityType::Enemy(id),
                                 map_idx: Tile {
-                                    x: curr_map_tile_x as u8,
-                                    y: curr_map_tile_y as u8,
+                                    x: curr_map_tile_x as u16,
+                                    y: curr_map_tile_y as u16,
                                 },
                             });
                         }
@@ -971,13 +1063,7 @@ struct World {
 impl World {
     fn default() -> Self {
         let mut walls = Vec::new();
-        let mut enemies = Enemies {
-            positions: Vec::new(),
-            velocities: Vec::new(),
-            healths: Vec::new(),
-            sizes: Vec::new(),
-            animation_states: Vec::new(),
-        };
+        let mut enemies = Enemies::new();
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
             angle: 0.0,
@@ -993,7 +1079,7 @@ impl World {
                         world_layout[y][x] = EntityType::None;
                     }
                     1 => {
-                        world_layout[y][x] = EntityType::Wall(walls.len() as u8);
+                        world_layout[y][x] = EntityType::Wall(walls.len() as u16);
                         walls.push(Vec2::new(x as f32, y as f32));
                     }
                     2 => {
@@ -1011,7 +1097,7 @@ impl World {
                             Vec2::new(1.0, 1.0),
                             AnimationState::default_skeleton()
                         );
-                        world_layout[y][x] = EntityType::Enemy(handle as u8);
+                        world_layout[y][x] = EntityType::Enemy(handle as u16);
                     }
                     _ => panic!("Invalid entity type in world layout"),
                 };
@@ -1130,11 +1216,11 @@ impl World {
     }
 
     fn update(&mut self) {
-        assert!(self.enemies.positions.len() < 255);
-        assert!(self.world_layout.len() < 255 && self.world_layout[0].len() < 255);
-        assert!(self.walls.len() < 255);
+        assert!(self.enemies.positions.len() < 65536);
+        assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
+        assert!(self.walls.len() < 65536);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
-        MovementSystem::update_enemies(&mut self.enemies, &self.walls, &mut self.world_layout);
+        MovementSystem::update_enemies(&mut self.enemies, &self.walls, &mut self.world_layout, Duration::from_secs_f32(get_time() as f32));
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             self.player.angle,
