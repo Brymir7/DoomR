@@ -1,5 +1,5 @@
 use core::panic;
-use std::{ collections::HashMap };
+use std::collections::HashMap;
 use config::config::{
     AMOUNT_OF_RAYS,
     HALF_SCREEN_HEIGHT,
@@ -15,8 +15,9 @@ use config::config::{
     WORLD_WIDTH,
 };
 use image_utils::load_and_convert_texture;
+use miniquad::date;
 use once_cell::sync::Lazy;
-use macroquad::{ prelude::* };
+use macroquad::prelude::*;
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
@@ -25,7 +26,9 @@ pub mod image_utils;
 enum Textures {
     Stone,
     Weapon,
-    Skeleton1,
+    SkeletonFrontSpriteSheet,
+    SkeletonBackSpriteSheet,
+    SkeletonSideSpriteSheet,
 }
 
 static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new(|| {
@@ -42,8 +45,25 @@ static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new
         load_and_convert_texture(include_bytes!("../textures/weapon.png"), ImageFormat::Png)
     );
     map.insert(
-        Textures::Skeleton1,
-        load_and_convert_texture(include_bytes!("../textures/skeleton1.png"), ImageFormat::Png)
+        Textures::SkeletonFrontSpriteSheet,
+        load_and_convert_texture(
+            include_bytes!("../textures/SkeletonFrontSpriteSheet.png"),
+            ImageFormat::Png
+        )
+    );
+    map.insert(
+        Textures::SkeletonSideSpriteSheet,
+        load_and_convert_texture(
+            include_bytes!("../textures/SkeletonSideSpriteSheet.png"),
+            ImageFormat::Png
+        )
+    );
+    map.insert(
+        Textures::SkeletonBackSpriteSheet,
+        load_and_convert_texture(
+            include_bytes!("../textures/SkeletonBackSpriteSheet.png"),
+            ImageFormat::Png
+        )
     );
     map
 });
@@ -112,39 +132,159 @@ impl WorldEvent {
 //         }
 //     }
 // }
+#[derive(Clone)]
+struct AnimationState {
+    frame: u8,
+    frames_amount: u8,
+    spritesheet_offset_per_frame: Vec2,
+    animation_type: EnemyAnimationType,
+    sprite_sheet: Texture2D,
+    ms_per_update: f32,
+    elapsed_time: f32,
+}
+impl AnimationState {
+    fn default_skeleton() -> Self {
+        let texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet).expect(
+            "Failed to load Skeleton Front Spritesheet"
+        );
+        const FRAMES_AMOUNT: u8 = 3;
+        let single_sprite_dimension_x = texture.width() / (FRAMES_AMOUNT as f32);
+        AnimationState {
+            frame: 0,
+            frames_amount: 3,
+            spritesheet_offset_per_frame: Vec2::new(single_sprite_dimension_x, 0.0),
+            sprite_sheet: texture.clone(),
+            animation_type: EnemyAnimationType::SkeletonFront,
+            ms_per_update: 0.3,
+            elapsed_time: 0.0,
+        }
+    }
+    fn next(&mut self, dt: f32) {
+        self.elapsed_time += dt;
+        if self.elapsed_time > self.ms_per_update {
+            self.frame = (self.frame + 1) % self.frames_amount;
+            self.elapsed_time = 0.0;
+        }
+    }
+    fn get_current_sprite_source(&self) -> Rect {
+        let current_frames_offset = (self.frame as f32) * self.spritesheet_offset_per_frame;
+        return Rect {
+            x: current_frames_offset.x,
+            y: current_frames_offset.y,
+            w: self.spritesheet_offset_per_frame.x,
+            h: self.spritesheet_offset_per_frame.y,
+        };
+    }
+    fn change_animation(
+        &mut self,
+        new_spritesheet: Texture2D,
+        new_animation_type: EnemyAnimationType,
+        single_sprite_dimensions: Vec2
+    ) {
+        self.frame = 0;
+        self.frames_amount = (new_spritesheet.width() / single_sprite_dimensions.x).trunc() as u8;
+        self.spritesheet_offset_per_frame = Vec2::new(
+            single_sprite_dimensions.x,
+            single_sprite_dimensions.y
+        );
+        self.sprite_sheet = new_spritesheet;
+        self.animation_type = new_animation_type;
+    }
+}
+#[derive(Clone, Copy, PartialEq)]
+enum EnemyAnimationType {
+    SkeletonFront,
+    SkeletonSide,
+    SkeletonBack,
+}
+
+struct UpdateEnemyAnimation;
+impl UpdateEnemyAnimation {
+    fn update(
+        player_origin: Vec2,
+        player_angle: f32,
+        enemy_positions: &Vec<Vec2>,
+        velocities: &Vec<Vec2>,
+        animation_states: &mut Vec<AnimationState>
+    ) {
+        for ((&enemy_pos, &velocity), animation_state) in enemy_positions
+            .iter()
+            .zip(velocities.iter())
+            .zip(animation_states.iter_mut()) {
+            let to_player = player_origin - enemy_pos;
+            let enemy_angle = velocity.angle_between(to_player);
+            animation_state.next(PHYSICS_FRAME_TIME);
+            match enemy_angle.abs() {
+                angle if angle < std::f32::consts::FRAC_PI_4 => {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
+                        animation_state.change_animation(
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
+                                .expect("Failed to load spritesheet skeleton")
+                                .clone(),
+                            EnemyAnimationType::SkeletonFront,
+                            Vec2::new(31.0, 48.0)
+                        );
+                    }
+                }
+                angle if angle > 3.0 * std::f32::consts::FRAC_PI_4 => {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonBack {
+                        animation_state.change_animation(
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonBackSpriteSheet)
+                                .expect("Failed to load spritesheet skeleton")
+                                .clone(),
+                            EnemyAnimationType::SkeletonBack,
+                            Vec2::new(31.0, 48.0)
+                        );
+                    }
+                }
+                _ => {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonSide {
+                        animation_state.change_animation(
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
+                                .expect("Failed to load spritesheet skeleton")
+                                .clone(),
+                            EnemyAnimationType::SkeletonSide,
+                            Vec2::new(31.0, 48.0)
+                        );
+                    }
+                }
+            };
+        }
+    }
+}
+
 struct Enemies {
     positions: Vec<Vec2>,
-    angles: Vec<f32>,
     velocities: Vec<Vec2>,
     healths: Vec<u8>,
     sizes: Vec<Vec2>,
+    animation_states: Vec<AnimationState>,
 }
 struct EnemyInformation {
     pos: Vec2,
-    angle: f32,
     vel: Vec2,
     health: u8,
     size: Vec2,
+    animation_state: AnimationState,
 }
 impl Enemies {
     fn new_enemy(
         &mut self,
         pos: Vec2,
-        angle: f32,
         velocity: Vec2,
         health: u8,
-        size: Vec2
+        size: Vec2,
+        animation: AnimationState
     ) -> usize {
         self.positions.push(pos);
-        self.angles.push(angle);
         self.velocities.push(velocity);
         self.healths.push(health);
         self.sizes.push(size);
+        self.animation_states.push(animation);
         return self.positions.len() - 1;
     }
     fn destroy_enemy(&mut self, idx: u8) {
         self.positions.swap_remove(idx as usize);
-        self.angles.swap_remove(idx as usize);
         self.velocities.swap_remove(idx as usize);
         self.healths.swap_remove(idx as usize);
     }
@@ -153,10 +293,13 @@ impl Enemies {
         println!("{}, len enemies {}", idx, self.positions.len());
         EnemyInformation {
             pos: *self.positions.get(idx).expect("Tried to acccess invalid enemy idx"),
-            angle: *self.angles.get(idx).expect("Tried to acccess invalid enemy idx"),
             vel: *self.velocities.get(idx).expect("Tried to acccess invalid enemy idx"),
             health: *self.healths.get(idx).expect("Tried to acccess invalid enemy idx"),
             size: *self.sizes.get(idx).expect("Tried to acccess invalid enemy idx"),
+            animation_state: self.animation_states
+                .get(idx)
+                .expect("Tried to acccess invalid enemy idx")
+                .clone(),
         }
     }
 }
@@ -198,42 +341,6 @@ impl Player {
 struct MovementSystem;
 
 impl MovementSystem {
-    fn update(
-        positions: &mut Vec<Vec2>,
-        velocities: &Vec<Vec2>,
-        entity_type: EntityType,
-        walls: &Vec<Vec2>,
-        world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
-    ) {
-        for ((i, pos), vel) in positions.iter_mut().enumerate().zip(velocities.iter()) {
-            let prev_tile = Tile::from_vec2(*pos);
-            pos.x += vel.x * PHYSICS_FRAME_TIME;
-            pos.y += vel.y * PHYSICS_FRAME_TIME;
-
-            Self::resolve_wall_collisions(pos, walls);
-
-            let new_tile = Tile::from_vec2(*pos);
-            match entity_type {
-                EntityType::Enemy(_) => {
-                    world_layout[new_tile.y as usize][new_tile.x as usize] = EntityType::Enemy(
-                        i as u8
-                    );
-                }
-                _ => {
-                    panic!("Do not use update function except for enemies atm!");
-                }
-            }
-            if prev_tile != new_tile {
-                assert!(
-                    matches!(
-                        world_layout[prev_tile.y as usize][prev_tile.x as usize],
-                        EntityType::Enemy(_)
-                    )
-                );
-                world_layout[prev_tile.y as usize][prev_tile.x as usize] = EntityType::None;
-            }
-        }
-    }
     fn update_enemies(
         enemies: &mut Enemies,
         walls: &Vec<Vec2>,
@@ -317,7 +424,7 @@ impl MovementSystem {
         }
     }
 }
-struct RaycastStepResult { // to avoid raytracing twice, we raytrace -  add any enemy we find, and break only at a wall (so that we can render enemy in front of wall)
+struct RaycastStepResult { // to avoid raytracing twice (or sorting the results by depth), we raytrace -  add any enemy we find, and break only at a wall (so that we can render enemy in front of wall)
     block: Option<RaycastResult>,
     enemy: Option<RaycastResult>,
 }
@@ -372,10 +479,8 @@ impl RaycastSystem {
         } else {
             ((curr_map_tile_y as f32) + 1.0 - origin.y) * relative_tile_dist_y
         };
-        while
-            curr_map_tile_x < WORLD_WIDTH && // assume it hits a wall before reaching the end of the map
-            curr_map_tile_y <= WORLD_HEIGHT
-        {
+        loop {
+            // assume it hits a wall due to level design
             let is_x_side = dist_side_x < dist_side_y;
             if is_x_side {
                 assert!(curr_map_tile_x > 0);
@@ -617,8 +722,9 @@ impl RenderPlayerPOV {
         player_origin: Vec2,
         player_angle: f32,
         raycast_step_res: &Vec<RaycastStepResult>,
-        enemies_positions: &Vec<Vec2>,
-        enemies_sizes: &Vec<Vec2>,
+        enemy_animation_states: &Vec<AnimationState>,
+        enemy_positions: &Vec<Vec2>,
+        enemy_sizes: &Vec<Vec2>,
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) {
         let block_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Stone).expect(
@@ -626,12 +732,7 @@ impl RenderPlayerPOV {
         );
         let text_width = block_texture.width();
         let text_height = block_texture.height();
-        let enemy_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Skeleton1).expect(
-            "Skeleton texture failed to initialize"
-        );
-        let enemy_text_width = enemy_texture.width();
-        let enemy_text_height = enemy_texture.height();
-        let aspect_ratio_sprite = enemy_text_width / enemy_text_height;
+
         for (i, result) in raycast_step_res.iter().enumerate() {
             if let Some(block) = &result.block {
                 let wall_color = match block.entity {
@@ -680,24 +781,30 @@ impl RenderPlayerPOV {
             }
             if let Some(enemy) = &result.enemy {
                 let enemy_handle = world_layout[enemy.map_idx.y as usize][enemy.map_idx.x as usize];
-                let enemy_map_idx = match enemy_handle {
+                let enemy_id = match enemy_handle {
                     EntityType::Enemy(idx) => idx,
                     _ => panic!("Invalid enemy handle"),
                 };
-                let enemy_size = enemies_sizes[enemy_map_idx as usize];
-                let enemy_center_pos = enemies_positions[enemy_map_idx as usize] + enemy_size;
+                let enemy_size = enemy_sizes[enemy_id as usize];
+                let enemy_center_pos = enemy_positions[enemy_id as usize] + enemy_size;
+                let enemy_animation_state = &enemy_animation_states[enemy_id as usize];
+                let enemy_texture_sheet = &enemy_animation_state.sprite_sheet;
+                let aspect_ratio_sprite =
+                    enemy_animation_state.spritesheet_offset_per_frame.x /
+                    enemy_animation_state.spritesheet_offset_per_frame.y;
                 let distance_vec = enemy_center_pos - player_origin;
-                let sprite_height = (
-                    (SCREEN_HEIGHT as f32) /
-                    (distance_vec.length() + 0.000001)
-                ).min(SCREEN_HEIGHT as f32) / aspect_ratio_sprite;
+                let sprite_height =
+                    ((SCREEN_HEIGHT as f32) / (distance_vec.length() + 0.000001)).min(
+                        SCREEN_HEIGHT as f32
+                    ) / aspect_ratio_sprite;
                 let sprite_screen_x = (i as f32) * RAY_VERTICAL_STRIPE_WIDTH;
                 let dir_ray = enemy.intersection_pos.angle_between(player_origin);
                 let dir_to_enemy = enemy_center_pos.angle_between(player_origin);
-                let text_coord_x =
-                    ((dir_ray - dir_to_enemy) * text_width) /
-                    aspect_ratio_sprite;
-                if text_coord_x < 0.0 || text_coord_x >= enemy_text_width {
+                let text_coord_x = ((dir_ray - dir_to_enemy) * text_width) / aspect_ratio_sprite;
+                if
+                    text_coord_x < 0.0 ||
+                    text_coord_x >= enemy_animation_state.spritesheet_offset_per_frame.x
+                {
                     continue;
                 }
                 let shade =
@@ -707,19 +814,22 @@ impl RenderPlayerPOV {
                         1.0
                     );
                 let sprite_color = Color::new(shade, shade, shade, 1.0);
+                let curr_spritesheet_source_rect =
+                    enemy_animation_state.get_current_sprite_source();
+                let source_rect = Rect {
+                    x: curr_spritesheet_source_rect.x + text_coord_x,
+                    y: 0.0,
+                    w: 1.0,
+                    h: enemy_animation_state.spritesheet_offset_per_frame.y,
+                };
                 draw_texture_ex(
-                    enemy_texture,
+                    &enemy_texture_sheet,
                     sprite_screen_x,
                     config::config::HALF_SCREEN_HEIGHT - sprite_height / 2.0,
                     sprite_color,
                     DrawTextureParams {
-                        source: Some(Rect {
-                            x: text_coord_x,
-                            y: 0.0,
-                            w: 1.0,
-                            h: enemy_text_height,
-                        }),
-                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height )),
+                        source: Some(source_rect),
+                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height)),
                         ..Default::default()
                     }
                 );
@@ -763,11 +873,11 @@ impl World {
     fn default() -> Self {
         let mut walls = Vec::new();
         let mut enemies = Enemies {
-            angles: Vec::new(),
             positions: Vec::new(),
             velocities: Vec::new(),
             healths: Vec::new(),
             sizes: Vec::new(),
+            animation_states: Vec::new(),
         };
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
@@ -797,10 +907,10 @@ impl World {
                     3 => {
                         let handle = enemies.new_enemy(
                             Vec2::new(x as f32, y as f32),
-                            0.0,
                             Vec2::new(1.0, -1.0),
                             1,
-                            Vec2::new(1.0, 1.0)
+                            Vec2::new(1.0, 1.0),
+                            AnimationState::default_skeleton()
                         );
                         world_layout[y][x] = EntityType::Enemy(handle as u8);
                     }
@@ -939,6 +1049,13 @@ impl World {
         assert!(self.walls.len() < 255);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
         MovementSystem::update_enemies(&mut self.enemies, &self.walls, &mut self.world_layout);
+        UpdateEnemyAnimation::update(
+            self.player.pos,
+            self.player.angle,
+            &self.enemies.positions,
+            &self.enemies.velocities,
+            &mut self.enemies.animation_states
+        );
     }
     fn draw(&self) {
         clear_background(LIGHTGRAY);
@@ -961,6 +1078,7 @@ impl World {
             self.player.pos,
             self.player.angle,
             &raycast_result,
+            &self.enemies.animation_states,
             &self.enemies.positions,
             &self.enemies.sizes,
             &self.world_layout
