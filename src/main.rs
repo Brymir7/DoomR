@@ -1,10 +1,12 @@
 use core::panic;
-use std::{ collections::HashMap, u8 };
+use std::{ collections::HashMap, f32::consts::PI, sync::Arc, u8 };
 use config::config::{
+    AMOUNT_OF_RAYS,
     HALF_SCREEN_HEIGHT,
     MAP_X_OFFSET,
     PHYSICS_FRAME_TIME,
     PLAYER_FOV,
+    RAY_VERTICAL_STRIPE_WIDTH,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
     TILE_SIZE_X_PIXEL,
@@ -14,7 +16,7 @@ use config::config::{
 };
 use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
-use macroquad::prelude::*;
+use macroquad::{prelude::*, text};
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
@@ -23,6 +25,7 @@ pub mod image_utils;
 enum Textures {
     Stone,
     Weapon,
+    Skeleton1,
 }
 
 static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new(|| {
@@ -37,6 +40,10 @@ static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new
     map.insert(
         Textures::Weapon,
         load_and_convert_texture(include_bytes!("../textures/weapon.png"), ImageFormat::Png)
+    );
+    map.insert(
+        Textures::Skeleton1,
+        load_and_convert_texture(include_bytes!("../textures/skeleton1.png"), ImageFormat::Png)
     );
     map
 });
@@ -166,6 +173,7 @@ impl Player {
         enemies: &Enemies
     ) -> Option<WorldEvent> {
         let result = RaycastSystem::daa_raycast(self.pos, self.angle, &world_layout, enemies);
+        // ADD PLAYER SHOOT ANGLE BASED ON POV, A SINGLE RAY MAKES IT FEEL BAD
         match result.enemy {
             Some(object_hit) => {
                 match object_hit.entity {
@@ -326,11 +334,11 @@ impl RaycastSystem {
         enemies: &Enemies
     ) -> Vec<RaycastStepResult> {
         let mut res = Vec::new();
-        for i in 0..SCREEN_WIDTH {
+        for i in 0..AMOUNT_OF_RAYS {
             let ray_angle =
                 player_angle +
                 config::config::PLAYER_FOV / 2.0 -
-                ((i as f32) / (SCREEN_WIDTH as f32)) * config::config::PLAYER_FOV;
+                ((i as f32) / (AMOUNT_OF_RAYS as f32)) * config::config::PLAYER_FOV;
 
             let step_result = RaycastSystem::daa_raycast(origin, ray_angle, tile_map, enemies);
             res.push(step_result);
@@ -558,13 +566,6 @@ impl RenderMap {
                     WHITE
                 );
             }
-            // draw_circle(
-            //     result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-            //         MAP_X_OFFSET,
-            //     result.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-            //     2.0,
-            //     WHITE
-            // );
         }
     }
 }
@@ -614,13 +615,22 @@ impl RenderPlayerPOV {
 
     fn render_world(
         player_origin: Vec2,
+        player_angle: f32,
         raycast_step_res: &Vec<RaycastStepResult>,
         enemies_positions: &Vec<Vec2>,
+        enemies_sizes: &Vec<Vec2>,
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) {
         let block_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Stone).expect(
             "Stone texture failed to initialize"
         );
+        let text_width = block_texture.width();
+        let text_height = block_texture.height();
+        let enemy_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Skeleton1).expect(
+            "Skeleton texture failed to initialize"
+        );
+        let enemy_text_width = enemy_texture.width();
+        let enemy_text_height = enemy_texture.height();
         for (i, result) in raycast_step_res.iter().enumerate() {
             if let Some(block) = &result.block {
                 let wall_color = match block.entity {
@@ -643,58 +653,62 @@ impl RenderPlayerPOV {
                 } else {
                     Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
                 };
+                let text_coord_x = if block.hit_from_x_side {
+                    (block.intersection_pos.y * text_width) % text_width
+                } else {
+                    (block.intersection_pos.x * text_width) % text_width
+                };
                 draw_texture_ex(
                     block_texture,
-                    i as f32,
+                    (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
                     config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
                     wall_color,
                     DrawTextureParams {
                         source: {
                             Some(Rect {
-                                x: (i as f32) % block_texture.width(),
+                                x: text_coord_x,
                                 y: 0.0,
                                 w: 1.0,
-                                h: block_texture.height(),
+                                h: text_height,
                             })
                         },
-                        dest_size: Some(Vec2::new(1.0, wall_height)),
+                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
                         ..Default::default()
                     }
                 );
             }
             if let Some(enemy) = &result.enemy {
                 let enemy_handle = world_layout[enemy.map_idx.y as usize][enemy.map_idx.x as usize];
-                let enemy_pos = match enemy_handle {
-                    EntityType::Enemy(idx) => { enemies_positions[idx as usize] }
+                let enemy_map_idx = match enemy_handle {
+                    EntityType::Enemy(idx) => idx,
                     _ => panic!("Invalid enemy handle"),
                 };
-                let distance = player_origin.distance(enemy_pos);
-                let wall_color = match enemy.entity {
-                    EntityType::Enemy(_) => RED,
-                    _ => panic!("Non enemy block"),
-                };
-                let wall_height = ((SCREEN_HEIGHT as f32) / (distance * 1.5 - 0.5 + 0.000001)).min(
-                    SCREEN_HEIGHT as f32
-                );
-                let shade =
-                    1.0 - (distance / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
-                let wall_color = Color::new(
-                    wall_color.r * shade,
-                    wall_color.g * shade,
-                    wall_color.b * shade,
-                    1.0
-                );
-                let wall_color = if enemy.hit_from_x_side {
-                    wall_color
-                } else {
-                    Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
-                };
-                draw_rectangle(
-                    i as f32,
-                    config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
-                    1.0,
-                    wall_height,
-                    wall_color
+                let enemy_size = enemies_sizes[enemy_map_idx as usize];
+                let distance_vec = enemies_positions[enemy_map_idx as usize] + enemy_size - player_origin;
+                let sprite_height = ((SCREEN_HEIGHT as f32) / (distance_vec.length() - 0.5 + 0.000001)).min(SCREEN_HEIGHT as f32);
+                let sprite_screen_x = (i as f32) * RAY_VERTICAL_STRIPE_WIDTH;
+                let dir_ray = enemy.intersection_pos.angle_between(player_origin);
+                let dir_to_enemy = (enemies_positions[enemy_map_idx as usize] + enemy_size).angle_between(player_origin);
+                let text_coord_x = (dir_ray - dir_to_enemy).rem_euclid(2.0 * PI) * text_width;
+                if text_coord_x < 0.0 || text_coord_x >= enemy_text_width {continue;}
+                let shade = 1.0 - (distance_vec.length() / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
+                let sprite_color = Color::new(shade, shade, shade, 1.0);
+            
+                draw_texture_ex(
+                    enemy_texture,
+                    sprite_screen_x,
+                    config::config::HALF_SCREEN_HEIGHT - sprite_height / 2.0,
+                    sprite_color,
+                    DrawTextureParams {
+                        source: Some(Rect {
+                            x: text_coord_x,
+                            y: 0.0,
+                            w: 1.0,
+                            h: enemy_text_height,
+                        }),
+                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height)),
+                        ..Default::default()
+                    }
                 );
             }
         }
@@ -932,8 +946,10 @@ impl World {
         );
         RenderPlayerPOV::render_world(
             self.player.pos,
+            self.player.angle,
             &raycast_result,
             &self.enemies.positions,
+            &self.enemies.sizes,
             &self.world_layout
         );
         RenderPlayerPOV::render_weapon();

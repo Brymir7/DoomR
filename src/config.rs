@@ -34,6 +34,8 @@ pub mod config {
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
     ];
     pub const SCREEN_WIDTH: usize = 1920;
+    pub const AMOUNT_OF_RAYS: usize = SCREEN_WIDTH / 8;
+    pub const RAY_VERTICAL_STRIPE_WIDTH: f32 = SCREEN_WIDTH as f32 / AMOUNT_OF_RAYS as f32;
     pub const HALF_SCREEN_WIDTH: f32 = (SCREEN_WIDTH as f32) / 2.0;
     pub const SCREEN_HEIGHT: usize = 1080;
     pub const HALF_SCREEN_HEIGHT: f32 = (SCREEN_HEIGHT as f32) / 2.0;
