@@ -1,5 +1,5 @@
 use core::panic;
-use std::{ collections::HashMap, f32::consts::PI, sync::Arc, u8 };
+use std::{ collections::HashMap };
 use config::config::{
     AMOUNT_OF_RAYS,
     HALF_SCREEN_HEIGHT,
@@ -16,7 +16,7 @@ use config::config::{
 };
 use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
-use macroquad::{ prelude::*, text };
+use macroquad::{ prelude::* };
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
