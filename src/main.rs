@@ -16,7 +16,7 @@ use config::config::{
 };
 use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
-use macroquad::{prelude::*, text};
+use macroquad::{ prelude::*, text };
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
@@ -631,6 +631,7 @@ impl RenderPlayerPOV {
         );
         let enemy_text_width = enemy_texture.width();
         let enemy_text_height = enemy_texture.height();
+        let aspect_ratio_sprite = enemy_text_width / enemy_text_height;
         for (i, result) in raycast_step_res.iter().enumerate() {
             if let Some(block) = &result.block {
                 let wall_color = match block.entity {
@@ -684,16 +685,28 @@ impl RenderPlayerPOV {
                     _ => panic!("Invalid enemy handle"),
                 };
                 let enemy_size = enemies_sizes[enemy_map_idx as usize];
-                let distance_vec = enemies_positions[enemy_map_idx as usize] + enemy_size - player_origin;
-                let sprite_height = ((SCREEN_HEIGHT as f32) / (distance_vec.length() - 0.5 + 0.000001)).min(SCREEN_HEIGHT as f32);
+                let enemy_center_pos = enemies_positions[enemy_map_idx as usize] + enemy_size;
+                let distance_vec = enemy_center_pos - player_origin;
+                let sprite_height = (
+                    (SCREEN_HEIGHT as f32) /
+                    (distance_vec.length() + 0.000001)
+                ).min(SCREEN_HEIGHT as f32) / aspect_ratio_sprite;
                 let sprite_screen_x = (i as f32) * RAY_VERTICAL_STRIPE_WIDTH;
                 let dir_ray = enemy.intersection_pos.angle_between(player_origin);
-                let dir_to_enemy = (enemies_positions[enemy_map_idx as usize] + enemy_size).angle_between(player_origin);
-                let text_coord_x = (dir_ray - dir_to_enemy).rem_euclid(2.0 * PI) * text_width;
-                if text_coord_x < 0.0 || text_coord_x >= enemy_text_width {continue;}
-                let shade = 1.0 - (distance_vec.length() / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
+                let dir_to_enemy = enemy_center_pos.angle_between(player_origin);
+                let text_coord_x =
+                    ((dir_ray - dir_to_enemy) * text_width) /
+                    aspect_ratio_sprite;
+                if text_coord_x < 0.0 || text_coord_x >= enemy_text_width {
+                    continue;
+                }
+                let shade =
+                    1.0 -
+                    (distance_vec.length() / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(
+                        0.0,
+                        1.0
+                    );
                 let sprite_color = Color::new(shade, shade, shade, 1.0);
-            
                 draw_texture_ex(
                     enemy_texture,
                     sprite_screen_x,
@@ -706,7 +719,7 @@ impl RenderPlayerPOV {
                             w: 1.0,
                             h: enemy_text_height,
                         }),
-                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height)),
+                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height )),
                         ..Default::default()
                     }
                 );
