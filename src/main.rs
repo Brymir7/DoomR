@@ -1,20 +1,27 @@
 use core::panic;
-use std::{ collections::HashMap, process::id, time::Duration };
+use std::{ collections::{ HashMap, HashSet }, f32::consts::PI, process::id, time::Duration };
+
 use config::config::{
     AMOUNT_OF_RAYS,
+    HALF_PLAYER_FOV,
     HALF_SCREEN_HEIGHT,
+    HALF_SCREEN_WIDTH,
+    LEFT_MOST_RAY,
     MAP_X_OFFSET,
     PHYSICS_FRAME_TIME,
     PLAYER_FOV,
     RAY_VERTICAL_STRIPE_WIDTH,
+    RIGHT_MOST_RAY,
     SCREEN_HEIGHT,
     SCREEN_WIDTH,
     TILE_SIZE_X_PIXEL,
     TILE_SIZE_Y_PIXEL,
     WORLD_HEIGHT,
+    WORLD_LAYOUT,
     WORLD_WIDTH,
 };
 use image_utils::load_and_convert_texture;
+const MAX_ENEMIES: usize = WORLD_WIDTH * WORLD_HEIGHT;
 use miniquad::date;
 use once_cell::sync::Lazy;
 use macroquad::prelude::*;
@@ -30,6 +37,12 @@ enum Textures {
     SkeletonBackSpriteSheet,
     SkeletonSideSpriteSheet,
 }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EnemyHandle(pub u16);
+const INVALID_ENEMY_HANDLE: EnemyHandle = EnemyHandle(u16::MAX);
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WallHandle(pub u16);
 
 static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new(|| {
     let mut map = HashMap::new();
@@ -85,13 +98,13 @@ enum EntityType {
     Player,
     Wall(u16),
     None,
-    Enemy(u16),
+    Enemy(EnemyHandle),
 }
 enum WorldEventType {
     PlayerHitEnemy,
     EnemyHitPlayer,
 }
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Eq, Hash)]
 struct Tile {
     x: u16,
     y: u16,
@@ -102,6 +115,12 @@ impl Tile {
             x: pos.x.round() as u16,
             y: pos.y.round() as u16,
         };
+    }
+    fn from_u32(value: u32) -> Self {
+        Tile {
+            x: (value >> 16) as u16,
+            y: (value & 0xffff) as u16,
+        }
     }
 }
 struct WorldEvent {
@@ -126,13 +145,13 @@ enum AnimationCallbackEventType {
 #[derive(Clone, Copy)]
 struct AnimationCallbackEvent {
     event_type: AnimationCallbackEventType,
-    target_handle: u16,
+    target_handle: EnemyHandle,
 }
 impl AnimationCallbackEvent {
     fn none() -> Self {
         AnimationCallbackEvent {
             event_type: AnimationCallbackEventType::None,
-            target_handle: 0,
+            target_handle: EnemyHandle(0),
         }
     }
 }
@@ -183,6 +202,9 @@ impl AnimationState {
         self.reset_frames();
     }
     fn next(&mut self, dt: f32) -> AnimationCallbackEvent {
+        self.sprite_sheet = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
+            .expect("")
+            .clone();
         assert!(self.physics_frames_per_update >= dt);
         self.elapsed_time += dt;
         let mut callback_event = AnimationCallbackEvent::none();
@@ -298,7 +320,7 @@ impl CallbackHandler {
             match callback.event_type {
                 AnimationCallbackEventType::KillEnemy => {
                     let enemy_idx = callback.target_handle;
-                    let mut enemy_information = enemies.get_enemy_information(enemy_idx);
+                    let mut enemy_information = enemies.get_enemy_information(enemy_idx.0);
                     enemy_information.animation_state.animation_type =
                         EnemyAnimationType::SkeletonBack;
                     let enemy_pos = enemy_information.pos;
@@ -319,7 +341,7 @@ impl CallbackHandler {
                             }
                         }
                     }
-                    enemies.destroy_enemy(enemy_idx);
+                    enemies.destroy_enemy(enemy_idx.0);
                 }
                 AnimationCallbackEventType::None => {}
             }
@@ -444,24 +466,19 @@ impl Player {
         let angles = [self.angle - RAY_SPREAD, self.angle, self.angle + RAY_SPREAD];
 
         for &angle in &angles {
-            let result = RaycastSystem::daa_raycast(self.pos, angle, &world_layout, enemies);
-
-            match result.enemy {
-                Some(object_hit) => {
-                    match object_hit.entity {
-                        EntityType::Enemy(_) => {
-                            if object_hit.distance <= 5.0 {
-                                // defines max distance to be able to shoot
-                                return Some(
-                                    WorldEvent::player_hit_enemy(
-                                        Tile::from_vec2(self.pos),
-                                        Tile::from_vec2(object_hit.intersection_pos)
-                                    )
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
+            let hit_enemy = RaycastSystem::shoot_bullet_raycast(self.pos, angle, &world_layout);
+            match hit_enemy {
+                Some(enemy) => {
+                    return Some(
+                        WorldEvent::player_hit_enemy(
+                            Tile::from_vec2(self.pos),
+                            Tile::from_vec2(
+                                *enemies.positions
+                                    .get(enemy.0 as usize)
+                                    .expect("Invalid enemy handle")
+                            )
+                        )
+                    );
                 }
                 _ => {}
             }
@@ -477,19 +494,19 @@ impl MovementSystem {
         enemies: &mut Enemies,
         walls: &Vec<Vec2>,
         world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
-        current_time: Duration,
+        current_time: Duration
     ) {
         const COLLISION_THRESHOLD: u32 = 5;
         const COLLISION_TIME_WINDOW: Duration = Duration::from_secs(2);
 
-        for (id, ((pos, vel), size)) in enemies.positions.iter_mut()
+        for (id, ((pos, vel), size)) in enemies.positions
+            .iter_mut()
             .zip(enemies.velocities.iter_mut())
             .zip(enemies.sizes.iter())
-            .enumerate()
-        {
+            .enumerate() {
             let prev_tiles = Self::get_occupied_tiles(*pos, *size);
             let mut new_pos = *pos + *vel * PHYSICS_FRAME_TIME;
-            
+
             let (collided_x, collided_y) = Self::resolve_wall_collisions(&mut new_pos, walls, *pos);
 
             if collided_x {
@@ -503,7 +520,8 @@ impl MovementSystem {
                 enemies.collision_data.collision_times[id] = current_time;
             }
 
-            let time_since_last_collision = current_time - enemies.collision_data.collision_times[id];
+            let time_since_last_collision =
+                current_time - enemies.collision_data.collision_times[id];
 
             if time_since_last_collision <= COLLISION_TIME_WINDOW {
                 if enemies.collision_data.x_collisions[id] >= COLLISION_THRESHOLD {
@@ -526,12 +544,18 @@ impl MovementSystem {
                 world_layout[tile.y as usize][tile.x as usize] = EntityType::None;
             }
             for tile in new_tiles {
-                world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(id as u16);
+                world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(
+                    EnemyHandle(id as u16)
+                );
             }
         }
     }
 
-    fn resolve_wall_collisions(position: &mut Vec2, walls: &Vec<Vec2>, old_position: Vec2) -> (bool, bool) {
+    fn resolve_wall_collisions(
+        position: &mut Vec2,
+        walls: &Vec<Vec2>,
+        old_position: Vec2
+    ) -> (bool, bool) {
         let mut collided_x = false;
         let mut collided_y = false;
 
@@ -607,21 +631,12 @@ impl MovementSystem {
         }
     }
 }
-struct RaycastStepResult { // to avoid raytracing twice (or sorting the results by depth), we raytrace -  add any enemy we find, and break only at a wall (so that we can render enemy in front of wall)
-    block: Option<RaycastResult>,
-    enemy: Option<RaycastResult>,
-}
-struct RaycastClosestCollisionPoint {
-    distance_to_origin: f32,
-    point: Vec2,
-}
 struct RaycastSystem;
 impl RaycastSystem {
     fn raycast(
         origin: Vec2,
         player_angle: f32,
-        tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
-        enemies: &Enemies
+        tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) -> Vec<RaycastStepResult> {
         let mut res = Vec::new();
         for i in 0..AMOUNT_OF_RAYS {
@@ -630,21 +645,19 @@ impl RaycastSystem {
                 config::config::PLAYER_FOV / 2.0 -
                 ((i as f32) / (AMOUNT_OF_RAYS as f32)) * config::config::PLAYER_FOV;
 
-            let step_result = RaycastSystem::daa_raycast(origin, ray_angle, tile_map, enemies);
-            res.push(step_result);
+            let step_result = RaycastSystem::daa_raycast(origin, ray_angle, tile_map);
+            if let Some(step) = step_result {
+                res.push(step);
+            }
         }
         res
     }
+
     fn daa_raycast(
         origin: Vec2,
         specific_angle: f32,
-        tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
-        enemies: &Enemies
-    ) -> RaycastStepResult {
-        let mut raycast_step_res = RaycastStepResult {
-            block: None,
-            enemy: None,
-        };
+        tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+    ) -> Option<RaycastStepResult> {
         let direction = Vec2::new(specific_angle.cos(), specific_angle.sin());
         let relative_tile_dist_x = 1.0 / direction.x.abs();
         let relative_tile_dist_y = 1.0 / direction.y.abs();
@@ -668,7 +681,6 @@ impl RaycastSystem {
             curr_map_tile_y > 0 &&
             curr_map_tile_y < WORLD_HEIGHT
         {
-            // assume it hits a wall due to level design
             let is_x_side = dist_side_x < dist_side_y;
             if is_x_side {
                 dist_side_x += relative_tile_dist_x;
@@ -677,117 +689,92 @@ impl RaycastSystem {
                 dist_side_y += relative_tile_dist_y;
                 curr_map_tile_y = ((curr_map_tile_y as isize) + step_y) as usize;
             }
-
             match tile_map[curr_map_tile_y][curr_map_tile_x] {
-                EntityType::Wall(handle) => {
+                EntityType::Wall(_) => {
                     let distance = if is_x_side {
                         dist_side_x - relative_tile_dist_x
                     } else {
                         dist_side_y - relative_tile_dist_y
                     };
-                    raycast_step_res.block = Some(RaycastResult {
-                        distance,
+                    return Some(RaycastStepResult {
                         intersection_pos: Vec2::new(
                             origin.x + direction.x * distance,
                             origin.y + direction.y * distance
                         ),
-                        hit_from_x_side: is_x_side,
-                        entity: EntityType::Wall(handle),
-                        map_idx: Tile {
-                            x: curr_map_tile_x as u16,
-                            y: curr_map_tile_y as u16,
+                        intersection_site: if is_x_side {
+                            if direction.x > 0.0 {
+                                IntersectedSite::XLeft
+                            } else {
+                                IntersectedSite::XRight
+                            }
+                        } else {
+                            if direction.y > 0.0 {
+                                IntersectedSite::YTop
+                            } else {
+                                IntersectedSite::YBottom
+                            }
+                        },
+                        corrected_distance: if is_x_side {
+                            dist_side_x - relative_tile_dist_x
+                        } else {
+                            dist_side_y - relative_tile_dist_y
                         },
                     });
-                    break;
-                }
-                EntityType::Enemy(id) => {
-                    let enemy_pos = enemies.positions[id as usize];
-                    let enemy_size = enemies.sizes[id as usize];
-                    if
-                        let Some(intersection) = Self::get_closest_collision_point(
-                            origin,
-                            direction,
-                            enemy_pos,
-                            enemy_size
-                        )
-                    {
-                        if
-                            intersection.distance_to_origin <
-                            raycast_step_res.enemy.map_or(f32::INFINITY, |e| e.distance)
-                        {
-                            // we can see multiple enemies before a block, but we only care about closest, due to size of enemy sprite, rn (might change later)
-                            raycast_step_res.enemy = Some(RaycastResult {
-                                distance: intersection.distance_to_origin,
-                                intersection_pos: intersection.point,
-                                hit_from_x_side: is_x_side,
-                                entity: EntityType::Enemy(id),
-                                map_idx: Tile {
-                                    x: curr_map_tile_x as u16,
-                                    y: curr_map_tile_y as u16,
-                                },
-                            });
-                        }
-                        // don't break here because we want to still see the background behind the enemy
-                    }
                 }
                 _ => {}
             }
         }
-        raycast_step_res
+        return None;
     }
-    fn get_closest_collision_point(
+    fn shoot_bullet_raycast(
         origin: Vec2,
-        direction: Vec2,
-        enemy_pos: Vec2,
-        enemy_size: Vec2
-    ) -> Option<RaycastClosestCollisionPoint> {
-        let t_near_x = (enemy_pos.x - origin.x) / direction.x;
-        let t_near_y = (enemy_pos.y - origin.y) / direction.y;
-        let t_far_x = (enemy_pos.x + enemy_size.x - origin.x) / direction.x;
-        let t_far_y = (enemy_pos.y + enemy_size.y - origin.y) / direction.y;
-
-        let (t_near_x, t_far_x) = if direction.x < 0.0 {
-            (t_far_x, t_near_x)
+        specific_angle: f32,
+        tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+    ) -> Option<EnemyHandle> {
+        // NOTE returns a handle
+        let direction = Vec2::new(specific_angle.cos(), specific_angle.sin());
+        let relative_tile_dist_x = 1.0 / direction.x.abs();
+        let relative_tile_dist_y = 1.0 / direction.y.abs();
+        let step_x: isize = if direction.x > 0.0 { 1 } else { -1 };
+        let step_y: isize = if direction.y > 0.0 { 1 } else { -1 };
+        let mut curr_map_tile_x = origin.x.trunc() as usize;
+        let mut curr_map_tile_y = origin.y.trunc() as usize;
+        let mut dist_side_x = if direction.x < 0.0 {
+            (origin.x - (curr_map_tile_x as f32)) * relative_tile_dist_x
         } else {
-            (t_near_x, t_far_x)
+            ((curr_map_tile_x as f32) + 1.0 - origin.x) * relative_tile_dist_x
+        };
+        let mut dist_side_y = if direction.y < 0.0 {
+            (origin.y - (curr_map_tile_y as f32)) * relative_tile_dist_y
+        } else {
+            ((curr_map_tile_y as f32) + 1.0 - origin.y) * relative_tile_dist_y
         };
 
-        let (t_near_y, t_far_y) = if direction.y < 0.0 {
-            (t_far_y, t_near_y)
-        } else {
-            (t_near_y, t_far_y)
-        };
-
-        let t_near = t_near_x.max(t_near_y);
-        let t_far = t_far_x.min(t_far_y);
-
-        if t_near <= t_far && t_far > 0.0 {
-            let intersection = origin + direction * t_near;
-            const EPSILON: f32 = 0.1;
-            if
-                // might not be necessary
-                intersection.x >= enemy_pos.x - EPSILON &&
-                intersection.x <= enemy_pos.x + enemy_size.x + EPSILON &&
-                intersection.y >= enemy_pos.y - EPSILON &&
-                intersection.y <= enemy_pos.y + enemy_size.y + EPSILON
-            {
-                Some(RaycastClosestCollisionPoint {
-                    distance_to_origin: t_near,
-                    point: intersection,
-                })
+        while
+            curr_map_tile_x > 0 &&
+            curr_map_tile_x < WORLD_WIDTH &&
+            curr_map_tile_y > 0 &&
+            curr_map_tile_y < WORLD_HEIGHT
+        {
+            let is_x_side = dist_side_x < dist_side_y;
+            if is_x_side {
+                dist_side_x += relative_tile_dist_x;
+                curr_map_tile_x = ((curr_map_tile_x as isize) + step_x) as usize;
             } else {
-                println!(
-                    "Didnt hit the enemy {}, {}, {}, {}",
-                    intersection.x >= enemy_pos.x - EPSILON,
-                    intersection.x <= enemy_pos.x + enemy_size.x + EPSILON,
-                    intersection.y >= enemy_pos.y - EPSILON,
-                    intersection.y <= enemy_pos.y + EPSILON
-                );
-                None
+                dist_side_y += relative_tile_dist_y;
+                curr_map_tile_y = ((curr_map_tile_y as isize) + step_y) as usize;
             }
-        } else {
-            None
+            match tile_map[curr_map_tile_y][curr_map_tile_x] {
+                EntityType::Wall(_) => {
+                    return None;
+                }
+                EntityType::Enemy(handle) => {
+                    return Some(handle);
+                }
+                _ => {}
+            }
         }
+        None
     }
 }
 struct RenderMap;
@@ -845,25 +832,21 @@ impl RenderMap {
     }
     fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastStepResult>) {
         for result in raycast_result.iter() {
-            if let Some(block) = &result.block {
-                draw_line(
-                    player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-                        MAP_X_OFFSET,
-                    player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                    block.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-                        MAP_X_OFFSET,
-                    block.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                    1.0,
-                    WHITE
-                );
-            }
+            draw_line(
+                player_origin.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
+                player_origin.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                result.intersection_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                    MAP_X_OFFSET,
+                result.intersection_pos.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                1.0,
+                WHITE
+            );
         }
     }
 }
 struct RenderPlayerPOV;
 impl RenderPlayerPOV {
     fn render_floor(material: &Material, player_angle: f32, player_pos: Vec2) {
-        const HALF_PLAYER_FOV: f32 = PLAYER_FOV / 2.0;
         let left_most_ray_dir = Vec2::new(
             (player_angle - HALF_PLAYER_FOV).cos(),
             (player_angle - HALF_PLAYER_FOV).sin()
@@ -904,14 +887,9 @@ impl RenderPlayerPOV {
         gl_use_default_material();
     }
 
-    fn render_world(
-        player_origin: Vec2,
-        player_angle: f32,
+    fn render_walls(
         raycast_step_res: &Vec<RaycastStepResult>,
-        enemy_animation_states: &Vec<AnimationState>,
-        enemy_positions: &Vec<Vec2>,
-        enemy_sizes: &Vec<Vec2>,
-        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
+        z_buffer: &mut [f32; AMOUNT_OF_RAYS]
     ) {
         let block_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Stone).expect(
             "Stone texture failed to initialize"
@@ -920,111 +898,99 @@ impl RenderPlayerPOV {
         let text_height = block_texture.height();
 
         for (i, result) in raycast_step_res.iter().enumerate() {
-            if let Some(block) = &result.block {
-                let wall_color = match block.entity {
-                    EntityType::Wall(_) => GREEN,
-                    _ => panic!("Non wall block"),
-                };
-                let wall_height = ((SCREEN_HEIGHT as f32) / (block.distance - 0.5 + 0.000001)).min(
-                    SCREEN_HEIGHT as f32
-                );
-                let shade =
-                    1.0 - (block.distance / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
-                let wall_color = Color::new(
-                    wall_color.r * shade,
-                    wall_color.g * shade,
-                    wall_color.b * shade,
-                    1.0
-                );
-                let wall_color = if block.hit_from_x_side {
-                    wall_color
-                } else {
-                    Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
-                };
-                let text_coord_x = if block.hit_from_x_side {
-                    (block.intersection_pos.y * text_width) % text_width
-                } else {
-                    (block.intersection_pos.x * text_width) % text_width
-                };
-                draw_texture_ex(
-                    block_texture,
-                    (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
-                    config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
-                    wall_color,
-                    DrawTextureParams {
-                        source: {
-                            Some(Rect {
-                                x: text_coord_x,
-                                y: 0.0,
-                                w: 1.0,
-                                h: text_height,
-                            })
-                        },
-                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
-                        ..Default::default()
-                    }
-                );
-            }
-            if let Some(enemy) = &result.enemy {
-                let enemy_handle = world_layout[enemy.map_idx.y as usize][enemy.map_idx.x as usize];
-                let enemy_id = match enemy_handle {
-                    EntityType::Enemy(idx) => idx,
-                    _ => panic!("Invalid enemy handle"),
-                };
-                let enemy_size = enemy_sizes[enemy_id as usize];
-                let enemy_center_pos = enemy_positions[enemy_id as usize] + enemy_size;
-                let enemy_animation_state = &enemy_animation_states[enemy_id as usize];
-                let enemy_texture_sheet = &enemy_animation_state.sprite_sheet;
-                let aspect_ratio_sprite =
-                    enemy_animation_state.spritesheet_offset_per_frame.x /
-                    enemy_animation_state.spritesheet_offset_per_frame.y;
-                let distance_vec = enemy_center_pos - player_origin;
-                let sprite_height =
-                    ((SCREEN_HEIGHT as f32) / (distance_vec.length() + 0.000001)).min(
-                        SCREEN_HEIGHT as f32
-                    ) / aspect_ratio_sprite;
-                let sprite_screen_x = (i as f32) * RAY_VERTICAL_STRIPE_WIDTH;
-                let dir_ray = enemy.intersection_pos.angle_between(player_origin);
-                let dir_to_enemy = enemy_center_pos.angle_between(player_origin);
-                let text_coord_x = ((dir_ray - dir_to_enemy) * text_width) / aspect_ratio_sprite;
+            let distance = result.corrected_distance;
+            z_buffer[i] = distance;
+            let wall_color = GREEN;
+            let wall_height = ((SCREEN_HEIGHT as f32) / (distance - 0.5 + 0.000001)).min(
+                SCREEN_HEIGHT as f32
+            );
+            let shade = 1.0 - (distance / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
+            let wall_color = Color::new(
+                wall_color.r * shade,
+                wall_color.g * shade,
+                wall_color.b * shade,
+                1.0
+            );
+            let is_x_side =
+                result.intersection_site == IntersectedSite::XLeft ||
+                result.intersection_site == IntersectedSite::XRight;
+            let wall_color = if is_x_side {
+                wall_color
+            } else {
+                Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
+            };
+            let text_coord_x = if is_x_side {
+                (result.intersection_pos.y * text_width) % text_width
+            } else {
+                (result.intersection_pos.x * text_width) % text_width
+            };
+            draw_texture_ex(
+                block_texture,
+                (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
+                config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
+                wall_color,
+                DrawTextureParams {
+                    source: {
+                        Some(Rect {
+                            x: text_coord_x,
+                            y: 0.0,
+                            w: 1.0,
+                            h: text_height,
+                        })
+                    },
+                    dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
+                    ..Default::default()
+                }
+            );
+        }
+    }
+    fn render_enemies(
+        z_buffer: &[f32; AMOUNT_OF_RAYS],
+        player_pos: Vec2,
+        player_angle: f32,
+        enemies: &Vec<SeenEnemy>,
+        positions: &Vec<Vec2>,
+        animation_states: &Vec<AnimationState>
+    ) {
+        for enemy in enemies {
+            let rel_sprite_x = (enemy.relative_angle - HALF_PLAYER_FOV).abs() / (PI / 2.0);
+            let sprite_x = rel_sprite_x * (SCREEN_WIDTH as f32);
+            let animation = &animation_states[enemy.enemy_handle.0 as usize];
+            let distance_to_player: f32 = player_pos.distance(
+                positions[enemy.enemy_handle.0 as usize]
+            );
+            let sprite_height = ((SCREEN_HEIGHT as f32) / distance_to_player - 0.5).min(
+                SCREEN_HEIGHT as f32
+            );
+            let screen_y = HALF_SCREEN_HEIGHT - sprite_height / 2.0;
+            let aspect_ratio = animation.spritesheet_offset_per_frame.x / sprite_height;
+            for x in 0..animation.spritesheet_offset_per_frame.x as usize {
+                let screen_coord_x = sprite_x + (x as f32);
                 if
-                    text_coord_x < 0.0 ||
-                    text_coord_x >= enemy_animation_state.spritesheet_offset_per_frame.x
+                    screen_coord_x >= (SCREEN_WIDTH as f32) ||
+                    z_buffer[screen_coord_x as usize] < distance_to_player
                 {
                     continue;
                 }
-                let shade =
-                    1.0 -
-                    (distance_vec.length() / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(
-                        0.0,
-                        1.0
-                    );
-                let sprite_source_and_color = enemy_animation_state.get_current_sprite_source();
-                let sprite_color = Color::new(
-                    sprite_source_and_color.color.r * shade,
-                    sprite_source_and_color.color.g * shade,
-                    sprite_source_and_color.color.b * shade,
-                    1.0
-                );
-
-                let source_rect = Rect {
-                    x: sprite_source_and_color.source.x + text_coord_x,
-                    y: 0.0,
-                    w: 1.0,
-                    h: enemy_animation_state.spritesheet_offset_per_frame.y,
-                };
+                
                 draw_texture_ex(
-                    &enemy_texture_sheet,
-                    sprite_screen_x,
-                    config::config::HALF_SCREEN_HEIGHT - sprite_height / 2.0,
-                    sprite_color,
+                    &animation.sprite_sheet,
+                    screen_coord_x,
+                    screen_y,
+                    animation.color,
                     DrawTextureParams {
-                        source: Some(source_rect),
-                        dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, sprite_height)),
+                        dest_size: Some(Vec2::new(1.0 / aspect_ratio, sprite_height)),
+                        source: Some(Rect {
+                            x: x as f32,
+                            y: 0.0,
+                            w: 1.0,
+                            h: animation.sprite_sheet.height(),
+                        }),
                         ..Default::default()
                     }
                 );
             }
+            println!("{}", sprite_x);
         }
     }
     fn render_weapon() {
@@ -1045,13 +1011,22 @@ impl RenderPlayerPOV {
         )
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+enum IntersectedSite {
+    XLeft,
+    XRight,
+    YTop,
+    YBottom,
+}
 #[derive(Clone, Copy)]
-struct RaycastResult {
-    distance: f32,
-    hit_from_x_side: bool,
+struct RaycastStepResult {
+    intersection_site: IntersectedSite,
     intersection_pos: Vec2,
-    entity: EntityType,
-    map_idx: Tile,
+    corrected_distance: f32,
+}
+struct SeenEnemy {
+    enemy_handle: EnemyHandle,
+    relative_angle: f32,
 }
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
@@ -1097,7 +1072,7 @@ impl World {
                             Vec2::new(1.0, 1.0),
                             AnimationState::default_skeleton()
                         );
-                        world_layout[y][x] = EntityType::Enemy(handle as u16);
+                        world_layout[y][x] = EntityType::Enemy(EnemyHandle(handle as u16));
                     }
                     _ => panic!("Invalid entity type in world layout"),
                 };
@@ -1169,7 +1144,7 @@ impl World {
                 match enemy_handle {
                     EntityType::Enemy(idx) => {
                         let health = self.enemies.healths
-                            .get_mut(idx as usize)
+                            .get_mut(idx.0 as usize)
                             .expect("Invalid handle in world layout");
                         if *health == 0 {
                             // avoid rescheduling animation callback
@@ -1178,7 +1153,7 @@ impl World {
                         *health -= 1;
                         if *health == 0 {
                             let enemy_animation_state =
-                                &mut self.enemies.animation_states[idx as usize];
+                                &mut self.enemies.animation_states[idx.0 as usize];
                             enemy_animation_state.set_callback(AnimationCallbackEvent {
                                 event_type: AnimationCallbackEventType::KillEnemy,
                                 target_handle: idx,
@@ -1203,9 +1178,11 @@ impl World {
         }
         if is_key_down(KeyCode::A) {
             self.player.angle -= 0.75 * get_frame_time();
+            self.player.angle = self.player.angle.rem_euclid(2.0 * PI);
         }
         if is_key_down(KeyCode::D) {
             self.player.angle += 0.75 * get_frame_time();
+            self.player.angle = self.player.angle.rem_euclid(2.0 * PI);
         }
         if is_key_pressed(KeyCode::Space) {
             let game_event = self.player.shoot(self.world_layout, &self.enemies);
@@ -1220,7 +1197,12 @@ impl World {
         assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
         assert!(self.walls.len() < 65536);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
-        MovementSystem::update_enemies(&mut self.enemies, &self.walls, &mut self.world_layout, Duration::from_secs_f32(get_time() as f32));
+        // MovementSystem::update_enemies(
+        //     &mut self.enemies,
+        //     &self.walls,
+        //     &mut self.world_layout,
+        //     Duration::from_secs_f32(get_time() as f32)
+        // );
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             self.player.angle,
@@ -1237,12 +1219,11 @@ impl World {
     fn draw(&self) {
         clear_background(LIGHTGRAY);
         let player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
-        let start_time = get_time();
-        let raycast_result: Vec<RaycastStepResult> = RaycastSystem::raycast(
+        let start_time: f64 = get_time();
+        let raycast_result = RaycastSystem::raycast(
             player_ray_origin,
             self.player.angle,
-            &self.world_layout,
-            &self.enemies
+            &self.world_layout
         );
         let end_time = get_time();
         let elapsed_time = end_time - start_time;
@@ -1251,19 +1232,53 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
-        RenderPlayerPOV::render_world(
+        let mut z_buffer = [f32::MAX; AMOUNT_OF_RAYS as usize];
+        RenderPlayerPOV::render_walls(&raycast_result, &mut z_buffer);
+        let mut seen_enemies = Vec::new();
+        for row in 0..self.world_layout.len() {
+            for entity in self.world_layout[row] {
+                match entity {
+                    EntityType::Enemy(enemy_handle) => {
+                        let enemy_pos = self.enemies.positions[enemy_handle.0 as usize];
+                        let angle_to_enemy = (enemy_pos.y - self.player.pos.y).atan2(
+                            enemy_pos.x - self.player.pos.x
+                        );
+                        let normalized_angle_to_enemy =
+                            (angle_to_enemy + 2.0 * std::f32::consts::PI) %
+                            (2.0 * std::f32::consts::PI);
+                        let mut angle_diff = normalized_angle_to_enemy - self.player.angle;
+                        if angle_diff > std::f32::consts::PI {
+                            angle_diff -= 2.0 * std::f32::consts::PI;
+                        } else if angle_diff < -std::f32::consts::PI {
+                            angle_diff += 2.0 * std::f32::consts::PI;
+                        }
+                        if
+                            angle_diff.abs() <= HALF_PLAYER_FOV &&
+                            !seen_enemies.iter().any(|e: &SeenEnemy| e.enemy_handle == enemy_handle)
+                        {
+                            seen_enemies.push(SeenEnemy {
+                                enemy_handle: enemy_handle,
+                                relative_angle: angle_diff,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        RenderPlayerPOV::render_enemies(
+            &z_buffer,
             self.player.pos,
             self.player.angle,
-            &raycast_result,
-            &self.enemies.animation_states,
+            &seen_enemies,
             &self.enemies.positions,
-            &self.enemies.sizes,
-            &self.world_layout
+            &self.enemies.animation_states
         );
         RenderPlayerPOV::render_weapon();
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_and_enemies_on_map(self.player.pos, &self.enemies);
         RenderMap::render_rays(player_ray_origin, &raycast_result);
+
         draw_text(&format!("Raycasting FPS: {}", 1.0 / elapsed_time), 10.0, 30.0, 20.0, RED);
     }
 }
