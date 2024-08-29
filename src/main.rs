@@ -180,7 +180,7 @@ impl AnimationState {
         let single_sprite_dimension_x = texture.width() / (FRAMES_AMOUNT as f32);
         AnimationState {
             frame: 0,
-            frames_amount: 3,
+            frames_amount: FRAMES_AMOUNT,
             spritesheet_offset_per_frame: Vec2::new(single_sprite_dimension_x, 0.0),
             sprite_sheet: texture.clone(),
             color: WHITE,
@@ -216,18 +216,6 @@ impl AnimationState {
             self.elapsed_time = 0.0;
         }
         return callback_event;
-    }
-    fn get_current_sprite_source(&self) -> AnimationSprite {
-        let current_frames_offset = (self.frame as f32) * self.spritesheet_offset_per_frame;
-        return AnimationSprite {
-            source: Rect {
-                x: current_frames_offset.x,
-                y: current_frames_offset.y,
-                w: self.spritesheet_offset_per_frame.x,
-                h: self.spritesheet_offset_per_frame.y,
-            },
-            color: self.color,
-        };
     }
     fn change_animation(
         &mut self,
@@ -541,12 +529,21 @@ impl MovementSystem {
 
             let new_tiles = Self::get_occupied_tiles(*pos, *size);
             for tile in prev_tiles {
-                world_layout[tile.y as usize][tile.x as usize] = EntityType::None;
+                match world_layout[tile.y as usize][tile.x as usize] {
+                    EntityType::Enemy(handle) => {
+                        if handle.0 as usize != id {continue;}
+                         world_layout[tile.y as usize][tile.x as usize] = EntityType::None
+                        }
+                    _ => {}
+                }
             }
             for tile in new_tiles {
-                world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(
-                    EnemyHandle(id as u16)
-                );
+                match world_layout[tile.y as usize][tile.x as usize] {
+                    EntityType::None => {
+                        world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(EnemyHandle(id as u16))
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -958,39 +955,49 @@ impl RenderPlayerPOV {
             let animation = &animation_states[enemy.enemy_handle.0 as usize];
             let distance_to_player: f32 = player_pos.distance(
                 positions[enemy.enemy_handle.0 as usize]
-            );
+            ) + 0.0001;
             let sprite_height = ((SCREEN_HEIGHT as f32) / distance_to_player - 0.5).min(
                 SCREEN_HEIGHT as f32
             );
             let screen_y = HALF_SCREEN_HEIGHT - sprite_height / 2.0;
-            let aspect_ratio = animation.spritesheet_offset_per_frame.x / sprite_height;
-            for x in 0..animation.spritesheet_offset_per_frame.x as usize {
-                let screen_coord_x = sprite_x + (x as f32);
+            let texture_width = animation.spritesheet_offset_per_frame.x;
+            let growth_factor =  sprite_height / animation.spritesheet_offset_per_frame.y;
+            let aspect_ratio = animation.spritesheet_offset_per_frame.x / animation.spritesheet_offset_per_frame.y;
+            let shade =
+                1.0 - (distance_to_player / (WORLD_WIDTH.min(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
+            let color = Color::new(
+                animation.color.r * shade,
+                animation.color.g * shade,
+                animation.color.b * shade,
+                1.0
+            );
+            let curr_animation_text_coord_x = animation.spritesheet_offset_per_frame.x * animation.frame as f32;
+            for x in 0..texture_width as  usize {
+                let screen_x = sprite_x + (x as f32 * growth_factor * aspect_ratio);
                 if
-                    screen_coord_x >= (SCREEN_WIDTH as f32) ||
-                    z_buffer[screen_coord_x as usize] < distance_to_player
+                    screen_x >= (SCREEN_WIDTH as f32) ||
+                    z_buffer[screen_x as usize] < distance_to_player
                 {
-                    continue;
+                    break;
                 }
-                
+                let source_rect = Rect {
+                    x: curr_animation_text_coord_x + (x as f32),
+                    y: 0.0,
+                    w: 1.0,
+                    h: animation.sprite_sheet.height(),
+                };
                 draw_texture_ex(
                     &animation.sprite_sheet,
-                    screen_coord_x,
+                    screen_x,
                     screen_y,
-                    animation.color,
+                    color,
                     DrawTextureParams {
-                        dest_size: Some(Vec2::new(1.0 / aspect_ratio, sprite_height)),
-                        source: Some(Rect {
-                            x: x as f32,
-                            y: 0.0,
-                            w: 1.0,
-                            h: animation.sprite_sheet.height(),
-                        }),
+                        dest_size: Some(Vec2::new(growth_factor * aspect_ratio, sprite_height)),
+                        source: Some(source_rect),
                         ..Default::default()
                     }
                 );
             }
-            println!("{}", sprite_x);
         }
     }
     fn render_weapon() {
@@ -1197,12 +1204,12 @@ impl World {
         assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
         assert!(self.walls.len() < 65536);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
-        // MovementSystem::update_enemies(
-        //     &mut self.enemies,
-        //     &self.walls,
-        //     &mut self.world_layout,
-        //     Duration::from_secs_f32(get_time() as f32)
-        // );
+        MovementSystem::update_enemies(
+            &mut self.enemies,
+            &self.walls,
+            &mut self.world_layout,
+            Duration::from_secs_f32(get_time() as f32)
+        );
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             self.player.angle,
