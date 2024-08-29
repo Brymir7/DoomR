@@ -169,6 +169,7 @@ struct AnimationState {
     color: Color,
     physics_frames_per_update: f32,
     elapsed_time: f32,
+    flip_x: bool,
     callback_event: AnimationCallbackEvent,
 }
 impl AnimationState {
@@ -187,6 +188,7 @@ impl AnimationState {
             animation_type: EnemyAnimationType::SkeletonFront,
             physics_frames_per_update: 20.0 * PHYSICS_FRAME_TIME,
             elapsed_time: 0.0,
+            flip_x: false,
             callback_event: AnimationCallbackEvent::none(),
         }
     }
@@ -201,10 +203,14 @@ impl AnimationState {
         self.callback_event = callback;
         self.reset_frames();
     }
+    fn need_to_flip_x(&self) -> bool {
+        match self.animation_type {
+            EnemyAnimationType::SkeletonSide => self.flip_x,
+            EnemyAnimationType::SkeletonBack => false,
+            EnemyAnimationType::SkeletonFront => false,
+        }
+    }
     fn next(&mut self, dt: f32) -> AnimationCallbackEvent {
-        self.sprite_sheet = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
-            .expect("")
-            .clone();
         assert!(self.physics_frames_per_update >= dt);
         self.elapsed_time += dt;
         let mut callback_event = AnimationCallbackEvent::none();
@@ -225,15 +231,23 @@ impl AnimationState {
     ) {
         self.frame = 0;
         self.frames_amount = (new_spritesheet.width() / single_sprite_dimensions.x).trunc() as u16;
+        let spritesheet_offset_per_frame_y = if
+            new_spritesheet.height() < single_sprite_dimensions.y * 2.0
+        {
+            0.0
+        } else {
+            single_sprite_dimensions.y
+        };
         self.spritesheet_offset_per_frame = Vec2::new(
             single_sprite_dimensions.x,
-            single_sprite_dimensions.y
+            spritesheet_offset_per_frame_y
         );
         self.sprite_sheet = new_spritesheet;
         self.animation_type = new_animation_type;
+        println!("Changing animation to {:?}", self.animation_type);
     }
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum EnemyAnimationType {
     SkeletonFront,
     SkeletonSide,
@@ -250,27 +264,45 @@ impl UpdateEnemyAnimation {
         animation_states: &mut Vec<AnimationState>
     ) -> Vec<AnimationCallbackEvent> {
         let mut res: Vec<AnimationCallbackEvent> = Vec::new();
+        let player_view_dir = Vec2::new(player_angle.cos(), player_angle.sin());
+        let look_more_into_x = if player_view_dir.x >= player_view_dir.y { true } else { false };
         for ((&enemy_pos, &velocity), animation_state) in enemy_positions
             .iter()
             .zip(velocities.iter())
             .zip(animation_states.iter_mut()) {
             let to_player = player_origin - enemy_pos;
-            let enemy_angle = velocity.angle_between(to_player);
+            let vel_enemy_rel_player = velocity.angle_between(to_player);
             let callback_event = animation_state.next(PHYSICS_FRAME_TIME);
             res.push(callback_event);
-            match enemy_angle.abs() {
-                angle if angle < std::f32::consts::FRAC_PI_4 => {
-                    if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
+            match vel_enemy_rel_player {
+                angle if angle > 0.0 && angle < std::f32::consts::FRAC_PI_4 => {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonSide {
                         animation_state.change_animation(
-                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
-                            EnemyAnimationType::SkeletonFront,
+                            EnemyAnimationType::SkeletonSide,
                             Vec2::new(31.0, 48.0)
                         );
                     }
+                    animation_state.flip_x = true;
                 }
-                angle if angle > 3.0 * std::f32::consts::FRAC_PI_4 => {
+                angle if angle <= 0.0 && angle > -PI => {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonSide {
+                        animation_state.change_animation(
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
+                                .expect("Failed to load spritesheet skeleton")
+                                .clone(),
+                            EnemyAnimationType::SkeletonSide,
+                            Vec2::new(31.0, 48.0)
+                        );
+                    }
+                    animation_state.flip_x = false;
+                }
+                angle if
+                    (angle > 0.0 && angle > std::f32::consts::FRAC_2_PI) ||
+                    (angle < 0.0 && angle > -std::f32::consts::FRAC_2_PI)
+                => {
                     if animation_state.animation_type != EnemyAnimationType::SkeletonBack {
                         animation_state.change_animation(
                             TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonBackSpriteSheet)
@@ -282,17 +314,17 @@ impl UpdateEnemyAnimation {
                     }
                 }
                 _ => {
-                    if animation_state.animation_type != EnemyAnimationType::SkeletonSide {
+                    if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
                         animation_state.change_animation(
-                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
+                            TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
-                            EnemyAnimationType::SkeletonSide,
+                            EnemyAnimationType::SkeletonFront,
                             Vec2::new(31.0, 48.0)
                         );
                     }
                 }
-            };
+            }
         }
         res
     }
@@ -531,16 +563,20 @@ impl MovementSystem {
             for tile in prev_tiles {
                 match world_layout[tile.y as usize][tile.x as usize] {
                     EntityType::Enemy(handle) => {
-                        if handle.0 as usize != id {continue;}
-                         world_layout[tile.y as usize][tile.x as usize] = EntityType::None
+                        if (handle.0 as usize) != id {
+                            continue;
                         }
+                        world_layout[tile.y as usize][tile.x as usize] = EntityType::None;
+                    }
                     _ => {}
                 }
             }
             for tile in new_tiles {
                 match world_layout[tile.y as usize][tile.x as usize] {
                     EntityType::None => {
-                        world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(EnemyHandle(id as u16))
+                        world_layout[tile.y as usize][tile.x as usize] = EntityType::Enemy(
+                            EnemyHandle(id as u16)
+                        );
                     }
                     _ => {}
                 }
@@ -953,16 +989,16 @@ impl RenderPlayerPOV {
             let rel_sprite_x = (enemy.relative_angle - HALF_PLAYER_FOV).abs() / (PI / 2.0);
             let sprite_x = rel_sprite_x * (SCREEN_WIDTH as f32);
             let animation = &animation_states[enemy.enemy_handle.0 as usize];
-            let distance_to_player: f32 = player_pos.distance(
-                positions[enemy.enemy_handle.0 as usize]
-            ) + 0.0001;
+            let distance_to_player: f32 =
+                player_pos.distance(positions[enemy.enemy_handle.0 as usize]) + 0.0001;
             let sprite_height = ((SCREEN_HEIGHT as f32) / distance_to_player - 0.5).min(
                 SCREEN_HEIGHT as f32
             );
             let screen_y = HALF_SCREEN_HEIGHT - sprite_height / 2.0;
             let texture_width = animation.spritesheet_offset_per_frame.x;
-            let growth_factor =  sprite_height / animation.spritesheet_offset_per_frame.y;
-            let aspect_ratio = animation.spritesheet_offset_per_frame.x / animation.spritesheet_offset_per_frame.y;
+            let growth_factor = sprite_height / animation.sprite_sheet.height();
+            let aspect_ratio =
+                animation.spritesheet_offset_per_frame.x / animation.sprite_sheet.height();
             let shade =
                 1.0 - (distance_to_player / (WORLD_WIDTH.min(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
             let color = Color::new(
@@ -971,17 +1007,31 @@ impl RenderPlayerPOV {
                 animation.color.b * shade,
                 1.0
             );
-            let curr_animation_text_coord_x = animation.spritesheet_offset_per_frame.x * animation.frame as f32;
-            for x in 0..texture_width as  usize {
-                let screen_x = sprite_x + (x as f32 * growth_factor * aspect_ratio);
+            let curr_animation_text_coord_x =
+                animation.spritesheet_offset_per_frame.x * (animation.frame as f32);
+            println!("need to flip_x {}", animation.need_to_flip_x());
+
+            let x_range: Box<dyn Iterator<Item = usize>> = if animation.need_to_flip_x() {
+                Box::new((0..texture_width as usize).rev())
+            } else {
+                Box::new(0..texture_width as usize)
+            };
+
+            for x in x_range {
+                let screen_x = sprite_x + (x as f32) * growth_factor * aspect_ratio;
                 if
                     screen_x >= (SCREEN_WIDTH as f32) ||
                     z_buffer[screen_x as usize] < distance_to_player
                 {
-                    break;
+                    continue;
                 }
+                let source_x = if animation.need_to_flip_x() {
+                    curr_animation_text_coord_x + (texture_width - 1.0 - (x as f32))
+                } else {
+                    curr_animation_text_coord_x + (x as f32)
+                };
                 let source_rect = Rect {
-                    x: curr_animation_text_coord_x + (x as f32),
+                    x: source_x,
                     y: 0.0,
                     w: 1.0,
                     h: animation.sprite_sheet.height(),
@@ -1210,6 +1260,7 @@ impl World {
             &mut self.world_layout,
             Duration::from_secs_f32(get_time() as f32)
         );
+        // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             self.player.angle,
