@@ -260,20 +260,37 @@ impl UpdateEnemyAnimation {
         player_origin: Vec2,
         player_angle: f32,
         enemy_positions: &Vec<Vec2>,
+        aggressive_states: &Vec<bool>,
         velocities: &Vec<Vec2>,
         animation_states: &mut Vec<AnimationState>
     ) -> Vec<AnimationCallbackEvent> {
         let mut res: Vec<AnimationCallbackEvent> = Vec::new();
         let player_view_dir = Vec2::new(player_angle.cos(), player_angle.sin());
         let look_more_into_x = if player_view_dir.x >= player_view_dir.y { true } else { false };
-        for ((&enemy_pos, &velocity), animation_state) in enemy_positions
+        for (((enemy_pos, velocity), is_aggressive), animation_state) in enemy_positions
             .iter()
             .zip(velocities.iter())
+            .zip(aggressive_states.iter())
             .zip(animation_states.iter_mut()) {
-            let to_player = player_origin - enemy_pos;
-            let vel_enemy_rel_player = velocity.angle_between(to_player);
+            
             let callback_event = animation_state.next(PHYSICS_FRAME_TIME);
             res.push(callback_event);
+            
+            if *is_aggressive {
+                if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
+                    animation_state.change_animation(
+                        TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
+                            .expect("Failed to load spritesheet skeleton")
+                            .clone(),
+                            EnemyAnimationType::SkeletonFront,
+                        Vec2::new(31.0, 48.0)
+                    );
+                    continue;
+                }
+            }
+
+            let to_player = player_origin - *enemy_pos;
+            let vel_enemy_rel_player = velocity.angle_between(to_player);
             match vel_enemy_rel_player {
                 angle if angle > 0.0 && angle < std::f32::consts::FRAC_PI_4 => {
                     if animation_state.animation_type != EnemyAnimationType::SkeletonSide {
@@ -391,6 +408,7 @@ struct EnemyInformation {
     health: u16,
     size: Vec2,
     animation_state: AnimationState,
+    aggressive: bool,
 }
 struct Enemies {
     positions: Vec<Vec2>,
@@ -398,6 +416,7 @@ struct Enemies {
     healths: Vec<u16>,
     sizes: Vec<Vec2>,
     animation_states: Vec<AnimationState>,
+    aggressive_states: Vec<bool>,
     collision_data: CollisionData,
 }
 
@@ -410,6 +429,7 @@ impl Enemies {
             sizes: Vec::new(),
             animation_states: Vec::new(),
             collision_data: CollisionData::new(0),
+            aggressive_states: Vec::new(),
         }
     }
 
@@ -430,6 +450,7 @@ impl Enemies {
         self.collision_data.x_collisions.push(0);
         self.collision_data.y_collisions.push(0);
         self.collision_data.collision_times.push(Duration::from_secs(0));
+        self.aggressive_states.push(false);
         index
     }
     fn destroy_enemy(&mut self, idx: u16) {
@@ -441,6 +462,7 @@ impl Enemies {
         self.collision_data.x_collisions.swap_remove(idx as usize);
         self.collision_data.y_collisions.swap_remove(idx as usize);
         self.collision_data.collision_times.swap_remove(idx as usize);
+        self.aggressive_states.swap_remove(idx as usize);
     }
     fn get_enemy_information(&self, idx: u16) -> EnemyInformation {
         let idx = idx as usize;
@@ -454,6 +476,9 @@ impl Enemies {
                 .get(idx)
                 .expect("Tried to acccess invalid enemy idx")
                 .clone(),
+            aggressive: *self.aggressive_states
+                .get(idx)
+                .expect("Tried to acccess invalid enemy idx"),
         }
     }
     fn update_based_on_enemy_information(&mut self, enemy_information: EnemyInformation) {
@@ -468,6 +493,8 @@ impl Enemies {
             enemy_information.size;
         *self.animation_states.get_mut(idx).expect("Invalid enemy information update") =
             enemy_information.animation_state;
+        *self.aggressive_states.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.aggressive;
     }
 }
 struct Player {
@@ -980,7 +1007,6 @@ impl RenderPlayerPOV {
     fn render_enemies(
         z_buffer: &[f32; AMOUNT_OF_RAYS],
         player_pos: Vec2,
-        player_angle: f32,
         enemies: &Vec<SeenEnemy>,
         positions: &Vec<Vec2>,
         animation_states: &Vec<AnimationState>
@@ -1084,6 +1110,16 @@ struct RaycastStepResult {
 struct SeenEnemy {
     enemy_handle: EnemyHandle,
     relative_angle: f32,
+}
+struct EnemyAggressionSystem;
+impl EnemyAggressionSystem {
+    fn get_aggressive_enemies(player_pos: Vec2, world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) -> Vec<EnemyHandle> {
+        let mut res: Vec<EnemyHandle> = Vec::new();
+        res
+    }
+    fn toggle_enemy_aggressive() {
+        todo!();
+    }
 }
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
@@ -1265,6 +1301,7 @@ impl World {
             self.player.pos,
             self.player.angle,
             &self.enemies.positions,
+            &self.enemies.aggressive_states,
             &self.enemies.velocities,
             &mut self.enemies.animation_states
         );
@@ -1327,7 +1364,6 @@ impl World {
         RenderPlayerPOV::render_enemies(
             &z_buffer,
             self.player.pos,
-            self.player.angle,
             &seen_enemies,
             &self.enemies.positions,
             &self.enemies.animation_states
