@@ -38,7 +38,7 @@ void main()
     vec2 floor_pos = u_player_pos + ray_dir * row_distance;
     vec2 tex_coords = fract(floor_pos);
     vec4 tex_color = texture(u_floor_texture, tex_coords);
-    float shade = clamp(1.0 - (row_distance / 5), 0.0, 1.0);
+    float shade = clamp(1.0 - (row_distance / 15), 0.0, 1.0);
     FragColor = vec4(tex_color.rgb * shade, 1.0);
 }
 ";

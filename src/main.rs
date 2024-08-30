@@ -2,13 +2,30 @@ use core::panic;
 use std::{ collections::{ HashMap, HashSet }, f32::consts::PI, process::id, time::Duration };
 
 use config::config::{
-    AMOUNT_OF_RAYS, ENEMY_VIEW_DISTANCE, HALF_PLAYER_FOV, HALF_SCREEN_HEIGHT, HALF_SCREEN_WIDTH, LEFT_MOST_RAY, MAP_X_OFFSET, PHYSICS_FRAME_TIME, PLAYER_FOV, RAY_VERTICAL_STRIPE_WIDTH, RIGHT_MOST_RAY, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE_X_PIXEL, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_LAYOUT, WORLD_WIDTH
+    AMOUNT_OF_RAYS,
+    ENEMY_VIEW_DISTANCE,
+    HALF_PLAYER_FOV,
+    HALF_SCREEN_HEIGHT,
+    HALF_SCREEN_WIDTH,
+    LEFT_MOST_RAY,
+    MAP_X_OFFSET,
+    PHYSICS_FRAME_TIME,
+    PLAYER_FOV,
+    RAY_VERTICAL_STRIPE_WIDTH,
+    RIGHT_MOST_RAY,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    TILE_SIZE_X_PIXEL,
+    TILE_SIZE_Y_PIXEL,
+    WORLD_HEIGHT,
+    WORLD_LAYOUT,
+    WORLD_WIDTH,
 };
 use image_utils::load_and_convert_texture;
 const MAX_ENEMIES: usize = WORLD_WIDTH * WORLD_HEIGHT;
 use miniquad::date;
 use once_cell::sync::Lazy;
-use macroquad::prelude::*;
+use macroquad::{ audio::{ load_sound, play_sound_once, Sound }, prelude::* };
 use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
 pub mod config;
 pub mod shaders;
@@ -228,7 +245,6 @@ impl AnimationState {
         );
         self.sprite_sheet = new_spritesheet;
         self.animation_type = new_animation_type;
-        println!("Changing animation to {:?}", self.animation_type);
     }
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -385,7 +401,7 @@ struct EnemyInformation {
     idx: u16,
     pos: Vec2,
     vel: Vec2,
-    health: u16,
+    health: u8,
     size: Vec2,
     animation_state: AnimationState,
     aggressive: bool,
@@ -393,7 +409,7 @@ struct EnemyInformation {
 struct Enemies {
     positions: Vec<Vec2>,
     velocities: Vec<Vec2>,
-    healths: Vec<u16>,
+    healths: Vec<u8>,
     sizes: Vec<Vec2>,
     animation_states: Vec<AnimationState>,
     aggressive_states: Vec<bool>,
@@ -417,7 +433,7 @@ impl Enemies {
         &mut self,
         pos: Vec2,
         velocity: Vec2,
-        health: u16,
+        health: u8,
         size: Vec2,
         animation: AnimationState
     ) -> usize {
@@ -477,41 +493,90 @@ impl Enemies {
             enemy_information.aggressive;
     }
 }
+struct Weapon {
+    reload_frames_t: u8, // in physics frames
+    damage: u8,
+    range: u8,
+    elapsed_reload_t: u8,
+}
+impl Weapon {
+    fn default() -> Self {
+        Weapon {
+            reload_frames_t: 20,
+            damage: 1,
+            range: 8,
+            elapsed_reload_t: 0,
+        }
+    }
+}
+struct WeaponSystem;
+impl WeaponSystem {
+    fn update_reload(player_weapon: &mut Weapon) {
+        println!("elapsed time {}", player_weapon.elapsed_reload_t);
+        if player_weapon.elapsed_reload_t > 0 {
+            player_weapon.elapsed_reload_t += 1;
+        }
+        if player_weapon.elapsed_reload_t >= player_weapon.reload_frames_t {
+            player_weapon.elapsed_reload_t = 0;
+        }
+    }
+}
+struct ShootEvent {
+    world_event: Option<WorldEvent>,
+    still_reloading: bool,
+}
 struct Player {
     pos: Vec2,
     angle: f32,
     vel: Vec2,
     health: u16,
+    weapon: Weapon,
 }
 impl Player {
     fn shoot(
-        &self,
+        &mut self,
         world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemies: &Enemies
-    ) -> Option<WorldEvent> {
+    ) -> ShootEvent {
         const RAY_SPREAD: f32 = PLAYER_FOV / 2.0 / 10.0; // basically defines the hitbox of the player shooting
         let angles = [self.angle - RAY_SPREAD, self.angle, self.angle + RAY_SPREAD];
-
+        if self.weapon.elapsed_reload_t > 0 {
+            return ShootEvent {
+                world_event: None,
+                still_reloading: true,
+            };
+        }
+        self.weapon.elapsed_reload_t = 1; // start reloading
         for &angle in &angles {
             let hit_enemy = RaycastSystem::shoot_bullet_raycast(self.pos, angle, &world_layout);
             match hit_enemy {
                 Some(enemy) => {
-                    return Some(
-                        WorldEvent::player_hit_enemy(
-                            Tile::from_vec2(self.pos),
-                            Tile::from_vec2(
-                                *enemies.positions
-                                    .get(enemy.0 as usize)
-                                    .expect("Invalid enemy handle")
+                    let enemy_pos = enemies.positions
+                        .get(enemy.0 as usize)
+                        .expect("Invalid enemy handle");
+                    let enemy_dist = self.pos.distance(*enemy_pos);
+                    let event = if enemy_dist.round() as u32 > self.weapon.range as u32 {
+                        None
+                    } else {
+                        Some(
+                            WorldEvent::player_hit_enemy(
+                                Tile::from_vec2(self.pos),
+                                Tile::from_vec2(*enemy_pos)
                             )
                         )
-                    );
+                    };
+                    return ShootEvent {
+                        world_event: event,
+                        still_reloading: false,
+                    };
                 }
                 _ => {}
             }
         }
-
-        None
+        return ShootEvent {
+            world_event: None,
+            still_reloading: false,
+        };
     }
 }
 
@@ -888,12 +953,12 @@ struct RenderPlayerPOV;
 impl RenderPlayerPOV {
     fn render_floor(material: &Material, player_angle: f32, player_pos: Vec2) {
         let left_most_ray_dir = Vec2::new(
-            (player_angle - HALF_PLAYER_FOV).cos(),
-            (player_angle - HALF_PLAYER_FOV).sin()
-        );
-        let right_most_ray_dir = Vec2::new(
             (player_angle + HALF_PLAYER_FOV).cos(),
             (player_angle + HALF_PLAYER_FOV).sin()
+        );
+        let right_most_ray_dir = Vec2::new(
+            (player_angle - HALF_PLAYER_FOV).cos(),
+            (player_angle - HALF_PLAYER_FOV).sin()
         );
         material.set_uniform("u_player_pos", player_pos);
         material.set_uniform("u_left_ray_dir", left_most_ray_dir);
@@ -944,7 +1009,7 @@ impl RenderPlayerPOV {
             let wall_height = ((SCREEN_HEIGHT as f32) / (distance - 0.5 + 0.000001)).min(
                 SCREEN_HEIGHT as f32
             );
-            let shade = 1.0 - (distance / (WORLD_WIDTH.max(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
+            let shade = 1.0 - (distance / (WORLD_WIDTH.min(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
             let wall_color = Color::new(
                 wall_color.r * shade,
                 wall_color.g * shade,
@@ -1117,12 +1182,14 @@ impl EnemyAggressionSystem {
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
     background_material: Material,
+    shoot_sound: Sound,
+    reload_sound: Sound,
     walls: Vec<Vec2>,
     enemies: Enemies,
     player: Player,
 }
 impl World {
-    fn default() -> Self {
+    async fn default() -> Self {
         let mut walls = Vec::new();
         let mut enemies = Enemies::new();
         let mut player = Player {
@@ -1130,6 +1197,7 @@ impl World {
             angle: 0.0,
             vel: Vec2::new(0.0, 0.0),
             health: 3,
+            weapon: Weapon::default(),
         };
         let layout = config::config::WORLD_LAYOUT;
         let mut world_layout = [[EntityType::None; WORLD_WIDTH]; WORLD_HEIGHT];
@@ -1212,12 +1280,16 @@ impl World {
                 ..Default::default()
             }
         ).unwrap();
+        let shoot_sound = load_sound("sounds/pistol_shoot.wav").await.unwrap();
+        let reload_sound = load_sound("sounds/reload.wav").await.unwrap();
         Self {
             world_layout,
             background_material: material,
             walls,
             enemies,
             player,
+            shoot_sound,
+            reload_sound,
         }
     }
 
@@ -1236,8 +1308,8 @@ impl World {
                             // avoid rescheduling animation callback
                             return;
                         }
-                        *health -= 1;
-                        if *health == 0 {
+
+                        if *health <= self.player.weapon.damage {
                             let enemy_animation_state =
                                 &mut self.enemies.animation_states[idx.0 as usize];
                             enemy_animation_state.set_callback(AnimationCallbackEvent {
@@ -1246,7 +1318,10 @@ impl World {
                             });
                             enemy_animation_state.set_physics_frames_per_update(20.0);
                             enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
+                            return;
                         }
+
+                        *health -= self.player.weapon.damage;
                     }
                     _ => panic!("Hit invalid enemy"),
                 }
@@ -1271,8 +1346,13 @@ impl World {
             self.player.angle = self.player.angle.rem_euclid(2.0 * PI);
         }
         if is_key_pressed(KeyCode::Space) {
-            let game_event = self.player.shoot(self.world_layout, &self.enemies);
-            if let Some(event) = game_event {
+            let shoot_event = self.player.shoot(self.world_layout, &self.enemies);
+            if shoot_event.still_reloading {
+                play_sound_once(&self.reload_sound);
+            } else {
+                play_sound_once(&self.shoot_sound);
+            }
+            if let Some(event) = shoot_event.world_event {
                 self.handle_game_event(event);
             }
         }
@@ -1282,6 +1362,7 @@ impl World {
         assert!(self.enemies.positions.len() < 65536);
         assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
         assert!(self.walls.len() < 65536);
+        WeaponSystem::update_reload(&mut self.player.weapon);
         MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
         MovementSystem::update_enemies(
             &mut self.enemies,
@@ -1333,7 +1414,9 @@ impl World {
             for entity in self.world_layout[row] {
                 match entity {
                     EntityType::Enemy(enemy_handle) => {
-                        if enemy_handle.0 as usize> self.enemies.positions.len() - 1 { continue; }
+                        if (enemy_handle.0 as usize) > self.enemies.positions.len() - 1 {
+                            continue;
+                        }
                         let enemy_pos = self.enemies.positions[enemy_handle.0 as usize];
                         let angle_to_enemy = (enemy_pos.y - self.player.pos.y).atan2(
                             enemy_pos.x - self.player.pos.x
@@ -1379,7 +1462,7 @@ impl World {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut elapsed_time = 0.0;
-    let mut world = World::default();
+    let mut world = World::default().await;
     loop {
         clear_background(BLACK);
         elapsed_time += get_frame_time();
