@@ -2,23 +2,7 @@ use core::panic;
 use std::{ collections::{ HashMap, HashSet }, f32::consts::PI, process::id, time::Duration };
 
 use config::config::{
-    AMOUNT_OF_RAYS,
-    HALF_PLAYER_FOV,
-    HALF_SCREEN_HEIGHT,
-    HALF_SCREEN_WIDTH,
-    LEFT_MOST_RAY,
-    MAP_X_OFFSET,
-    PHYSICS_FRAME_TIME,
-    PLAYER_FOV,
-    RAY_VERTICAL_STRIPE_WIDTH,
-    RIGHT_MOST_RAY,
-    SCREEN_HEIGHT,
-    SCREEN_WIDTH,
-    TILE_SIZE_X_PIXEL,
-    TILE_SIZE_Y_PIXEL,
-    WORLD_HEIGHT,
-    WORLD_LAYOUT,
-    WORLD_WIDTH,
+    AMOUNT_OF_RAYS, ENEMY_VIEW_DISTANCE, HALF_PLAYER_FOV, HALF_SCREEN_HEIGHT, HALF_SCREEN_WIDTH, LEFT_MOST_RAY, MAP_X_OFFSET, PHYSICS_FRAME_TIME, PLAYER_FOV, RAY_VERTICAL_STRIPE_WIDTH, RIGHT_MOST_RAY, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE_X_PIXEL, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_LAYOUT, WORLD_WIDTH
 };
 use image_utils::load_and_convert_texture;
 const MAX_ENEMIES: usize = WORLD_WIDTH * WORLD_HEIGHT;
@@ -265,30 +249,26 @@ impl UpdateEnemyAnimation {
         animation_states: &mut Vec<AnimationState>
     ) -> Vec<AnimationCallbackEvent> {
         let mut res: Vec<AnimationCallbackEvent> = Vec::new();
-        let player_view_dir = Vec2::new(player_angle.cos(), player_angle.sin());
-        let look_more_into_x = if player_view_dir.x >= player_view_dir.y { true } else { false };
         for (((enemy_pos, velocity), is_aggressive), animation_state) in enemy_positions
             .iter()
             .zip(velocities.iter())
             .zip(aggressive_states.iter())
             .zip(animation_states.iter_mut()) {
-            
             let callback_event = animation_state.next(PHYSICS_FRAME_TIME);
             res.push(callback_event);
-            
+
             if *is_aggressive {
                 if animation_state.animation_type != EnemyAnimationType::SkeletonFront {
                     animation_state.change_animation(
                         TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
                             .expect("Failed to load spritesheet skeleton")
                             .clone(),
-                            EnemyAnimationType::SkeletonFront,
+                        EnemyAnimationType::SkeletonFront,
                         Vec2::new(31.0, 48.0)
                     );
-                    continue;
                 }
+                continue;
             }
-
             let to_player = player_origin - *enemy_pos;
             let vel_enemy_rel_player = velocity.angle_between(to_player);
             match vel_enemy_rel_player {
@@ -1035,7 +1015,6 @@ impl RenderPlayerPOV {
             );
             let curr_animation_text_coord_x =
                 animation.spritesheet_offset_per_frame.x * (animation.frame as f32);
-            println!("need to flip_x {}", animation.need_to_flip_x());
 
             let x_range: Box<dyn Iterator<Item = usize>> = if animation.need_to_flip_x() {
                 Box::new((0..texture_width as usize).rev())
@@ -1113,12 +1092,26 @@ struct SeenEnemy {
 }
 struct EnemyAggressionSystem;
 impl EnemyAggressionSystem {
-    fn get_aggressive_enemies(player_pos: Vec2, world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) -> Vec<EnemyHandle> {
-        let mut res: Vec<EnemyHandle> = Vec::new();
-        res
-    }
-    fn toggle_enemy_aggressive() {
-        todo!();
+    fn toggle_enemy_aggressive(
+        player_pos: Vec2,
+        enemy_positions: &Vec<Vec2>,
+        enemy_velocities: &mut Vec<Vec2>,
+        aggressive_states: &mut Vec<bool>
+    ) {
+        let tile_pos_player = player_pos.trunc();
+        for ((enemy_pos, enemy_vel), is_aggressive) in enemy_positions
+            .iter()
+            .zip(enemy_velocities.iter_mut())
+            .zip(aggressive_states.iter_mut()) {
+            let dist_vector = tile_pos_player - enemy_pos.trunc();
+            if dist_vector.length() <= ENEMY_VIEW_DISTANCE {
+                *is_aggressive = true;
+                *enemy_vel = dist_vector.normalize();
+            } else if *is_aggressive {
+                *is_aggressive = false;
+                *enemy_vel = Vec2::new(1.0, -1.0);
+            }
+        }
     }
 }
 struct World {
@@ -1296,6 +1289,12 @@ impl World {
             &mut self.world_layout,
             Duration::from_secs_f32(get_time() as f32)
         );
+        EnemyAggressionSystem::toggle_enemy_aggressive(
+            self.player.pos,
+            &self.enemies.positions,
+            &mut self.enemies.velocities,
+            &mut self.enemies.aggressive_states
+        );
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
@@ -1334,6 +1333,7 @@ impl World {
             for entity in self.world_layout[row] {
                 match entity {
                     EntityType::Enemy(enemy_handle) => {
+                        if enemy_handle.0 as usize> self.enemies.positions.len() - 1 { continue; }
                         let enemy_pos = self.enemies.positions[enemy_handle.0 as usize];
                         let angle_to_enemy = (enemy_pos.y - self.player.pos.y).atan2(
                             enemy_pos.x - self.player.pos.x
