@@ -1,19 +1,32 @@
 use core::panic;
-use std::{
-    collections::{ HashMap },
-    f32::consts::PI,
-    process::{ exit },
-    time::Duration,
-};
-use miniquad::{BlendFactor, BlendState, BlendValue, Equation};
+use std::{ collections::{ HashMap }, f32::consts::PI, process::{ exit }, time::Duration };
+use miniquad::{ BlendFactor, BlendState, BlendValue, Equation };
 use ::rand::random;
 use config::config::{
-    AMOUNT_OF_RAYS, ENEMY_VIEW_DISTANCE, HALF_PLAYER_FOV, HALF_SCREEN_HEIGHT, MAP_X_OFFSET, PHYSICS_FRAME_TIME, PLAYER_FOV, RAY_VERTICAL_STRIPE_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE_X_PIXEL, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_WIDTH
+    AMOUNT_OF_RAYS,
+    ENEMY_VIEW_DISTANCE,
+    HALF_PLAYER_FOV,
+    HALF_SCREEN_HEIGHT,
+    MAP_X_OFFSET,
+    PHYSICS_FRAME_TIME,
+    PLAYER_FOV,
+    RAY_VERTICAL_STRIPE_WIDTH,
+    SCREEN_HEIGHT,
+    SCREEN_WIDTH,
+    TILE_SIZE_X_PIXEL,
+    TILE_SIZE_Y_PIXEL,
+    WORLD_HEIGHT,
+    WORLD_WIDTH,
 };
 use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
 use macroquad::{ audio::{ load_sound, play_sound_once, Sound }, prelude::* };
-use shaders::shaders::{ DEFAULT_FRAGMENT_SHADER, DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER, CAMERA_SHAKE_VERTEX_SHADER } ;
+use shaders::shaders::{
+    DEFAULT_FRAGMENT_SHADER,
+    DEFAULT_VERTEX_SHADER,
+    FLOOR_FRAGMENT_SHADER,
+    CAMERA_SHAKE_VERTEX_SHADER,
+};
 pub mod config;
 pub mod shaders;
 pub mod image_utils;
@@ -1324,7 +1337,7 @@ impl CameraShake {
 enum VisualEffect {
     CameraShake(CameraShake),
     BloodyScreen,
-    None
+    None,
 }
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
@@ -1445,18 +1458,18 @@ impl World {
                         name: "shake_offset".to_string(),
                         uniform_type: UniformType::Float2,
                         array_count: 1,
-                    },
+                    }
                 ],
                 pipeline_params: PipelineParams {
-                    color_blend: Some(BlendState::new(
-                        Equation::Add,
-                        BlendFactor::Value(BlendValue::SourceAlpha),
-                        BlendFactor::OneMinusValue(BlendValue::SourceAlpha))
+                    color_blend: Some(
+                        BlendState::new(
+                            Equation::Add,
+                            BlendFactor::Value(BlendValue::SourceAlpha),
+                            BlendFactor::OneMinusValue(BlendValue::SourceAlpha)
+                        )
                     ),
-                    alpha_blend: Some(BlendState::new(
-                        Equation::Add,
-                        BlendFactor::Zero,
-                        BlendFactor::One)
+                    alpha_blend: Some(
+                        BlendState::new(Equation::Add, BlendFactor::Zero, BlendFactor::One)
                     ),
                     ..Default::default()
                 },
@@ -1533,21 +1546,16 @@ impl World {
         }
     }
     fn move_player(&mut self, delta: Vec2) {
-
         let old_pos = self.player.pos;
-        
 
         self.player.pos += delta;
-        
 
         let old_tile_x = old_pos.x.floor() as usize;
         let old_tile_y = old_pos.y.floor() as usize;
         let new_tile_x = self.player.pos.x.floor() as usize;
         let new_tile_y = self.player.pos.y.floor() as usize;
-        
 
-        if (old_tile_x != new_tile_x) || (old_tile_y != new_tile_y) {
-
+        if old_tile_x != new_tile_x || old_tile_y != new_tile_y {
             if self.world_layout[old_tile_y][old_tile_x] == EntityType::Player {
                 self.world_layout[old_tile_y][old_tile_x] = EntityType::None;
             }
@@ -1562,11 +1570,9 @@ impl World {
                     exit(1);
                 }
                 self.player.health -= 1;
-                self.postprocessing = VisualEffect::CameraShake(
-                    CameraShake::new(0.5, 10.0)
-                );
-            },
-            WorldEventType::PlayerHitEnemy => todo!()
+                self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.5, 10.0));
+            }
+            WorldEventType::PlayerHitEnemy => todo!(),
         }
     }
 
@@ -1643,7 +1649,6 @@ impl World {
     }
 
     fn draw(&mut self) {
-
         clear_background(LIGHTGRAY);
         let player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
         let start_time: f64 = get_time();
@@ -1659,29 +1664,22 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
-
-        let shake_offset = CameraShake::new(1.0, 5.0).update(get_frame_time());
-        self.camera_shake_material.set_uniform("screen_size", Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
-        self.camera_shake_material.set_uniform("shake_offset", shake_offset);
-
-
-        if shake_offset == Vec2::ZERO {
-            self.postprocessing = VisualEffect::None;
-        }        match &mut self.postprocessing {
-            VisualEffect::CameraShake( shake) => {
-                // gl_use_material(&self.camera_shake_material);
-                // let shake_offset = shake.update(get_frame_time());
-                // println!("Shake offset {}", shake_offset);
-                // self.camera_shake_material.set_uniform("screen_size", Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
-                // self.camera_shake_material.set_uniform("shake_offset", shake_offset);
-                // if shake_offset == Vec2::ZERO {
-                //     self.postprocessing = VisualEffect::None;
-                // }
+        match &mut self.postprocessing {
+            VisualEffect::CameraShake(shake) => {
+                gl_use_material(&self.camera_shake_material);
+                let shake_offset = shake.update(get_frame_time());
+                self.camera_shake_material.set_uniform(
+                    "screen_size",
+                    Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
+                );
+                self.camera_shake_material.set_uniform("shake_offset", shake_offset);
+                if shake_offset == Vec2::ZERO {
+                    self.postprocessing = VisualEffect::None;
+                }
             }
             VisualEffect::None => {}
-            _ => todo!()
+            _ => todo!(),
         }
-        gl_use_material(&self.camera_shake_material);
         let mut z_buffer = [f32::MAX; AMOUNT_OF_RAYS as usize];
         RenderPlayerPOV::render_walls(&raycast_result, &mut z_buffer);
         let mut seen_enemies = Vec::new();
@@ -1718,7 +1716,7 @@ impl World {
                     _ => {}
                 }
             }
-        } 
+        }
         RenderPlayerPOV::render_enemies(
             &z_buffer,
             self.player.pos,
