@@ -425,6 +425,7 @@ struct EnemyInformation {
     size: Vec2,
     animation_state: AnimationState,
     aggressive: bool,
+    interactable: bool,
 }
 struct Enemies {
     positions: Vec<Vec2>,
@@ -434,6 +435,7 @@ struct Enemies {
     animation_states: Vec<AnimationState>,
     aggressive_states: Vec<bool>,
     collision_data: CollisionData,
+    interactables: Vec<bool>,
 }
 
 impl Enemies {
@@ -446,6 +448,7 @@ impl Enemies {
             animation_states: Vec::new(),
             collision_data: CollisionData::new(0),
             aggressive_states: Vec::new(),
+            interactables: Vec::new(),
         }
     }
 
@@ -467,6 +470,7 @@ impl Enemies {
         self.collision_data.y_collisions.push(0);
         self.collision_data.collision_times.push(Duration::from_secs(0));
         self.aggressive_states.push(false);
+        self.interactables.push(true);
         index
     }
     fn destroy_enemy(&mut self, idx: u16) {
@@ -479,6 +483,7 @@ impl Enemies {
         self.collision_data.y_collisions.swap_remove(idx as usize);
         self.collision_data.collision_times.swap_remove(idx as usize);
         self.aggressive_states.swap_remove(idx as usize);
+        self.interactables.swap_remove(idx as usize);
     }
     fn get_enemy_information(&self, idx: u16) -> EnemyInformation {
         let idx = idx as usize;
@@ -495,6 +500,7 @@ impl Enemies {
             aggressive: *self.aggressive_states
                 .get(idx)
                 .expect("Tried to acccess invalid enemy idx"),
+            interactable: *self.interactables.get(idx).expect("Tried to acccess invalid enemy idx"),
         }
     }
     fn update_based_on_enemy_information(&mut self, enemy_information: EnemyInformation) {
@@ -511,6 +517,8 @@ impl Enemies {
             enemy_information.animation_state;
         *self.aggressive_states.get_mut(idx).expect("Invalid enemy information update") =
             enemy_information.aggressive;
+        *self.interactables.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.interactable;
     }
 }
 struct Weapon {
@@ -522,7 +530,7 @@ struct Weapon {
 impl Weapon {
     fn default() -> Self {
         Weapon {
-            reload_frames_t: 20,
+            reload_frames_t: 30,
             damage: 1,
             range: 8,
             elapsed_reload_t: 0,
@@ -605,10 +613,11 @@ impl MovingEntityCollisionSystem {
         player_pos: &Vec2,
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemy_positions: &Vec<Vec2>,
-        enemy_sizes: &Vec<Vec2>
+        enemy_sizes: &Vec<Vec2>,
+        enemy_interactables: &Vec<bool>,
     ) -> Option<WorldEventHandleBased> {
         let player_size = Vec2::new(1.0, 1.0);
-        let check_radius = 2; // Adjust this value based on the maximum enemy size
+        let check_radius = 2; // based on maximum enemy size
 
         let start_x = ((player_pos.x as i32) - check_radius).max(0) as usize;
         let end_x = ((player_pos.x as i32) + check_radius + 1).min(WORLD_WIDTH as i32) as usize;
@@ -619,9 +628,11 @@ impl MovingEntityCollisionSystem {
             for x in start_x..end_x {
                 if let EntityType::Enemy(enemy_handle) = world_layout[y][x] {
                     let enemy_index = enemy_handle.0 as usize;
+                    let enemy_interactable = enemy_interactables[enemy_index];
+                    if !enemy_interactable {continue;}
                     let enemy_pos = &enemy_positions[enemy_index];
                     let enemy_size = &enemy_sizes[enemy_index];
-
+                    
                     if Self::check_collision(player_pos, &player_size, enemy_pos, enemy_size) {
                         return Some(WorldEventHandleBased::EnemyHitPlayer(enemy_handle));
                     }
@@ -635,15 +646,18 @@ impl MovingEntityCollisionSystem {
     fn check_enemy_enemy_collisions(
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemy_positions: &Vec<Vec2>,
-        enemy_sizes: &Vec<Vec2>
+        enemy_sizes: &Vec<Vec2>,
+        enemy_interactables: &Vec<bool>,
     ) -> Vec<(EnemyHandle, EnemyHandle)> {
         let mut collisions = Vec::new();
-        let check_radius = 2; // Adjust this value based on the maximum enemy size
+        let check_radius = 2; // Based on enemy size later
 
         for y in 0..WORLD_HEIGHT {
             for x in 0..WORLD_WIDTH {
                 if let EntityType::Enemy(enemy_handle1) = world_layout[y][x] {
                     let enemy_index1 = enemy_handle1.0 as usize;
+                    let enemy_interactable1 = &enemy_interactables[enemy_index1];
+                    if !enemy_interactable1 {continue;}
                     let enemy_pos1 = &enemy_positions[enemy_index1];
                     let enemy_size1 = &enemy_sizes[enemy_index1];
 
@@ -664,6 +678,8 @@ impl MovingEntityCollisionSystem {
                             {
                                 if enemy_handle1 != enemy_handle2 {
                                     let enemy_index2 = enemy_handle2.0 as usize;
+                                    let enemy_interactable2 = enemy_interactables[enemy_index2];
+                                    if !enemy_interactable2 {continue;}
                                     let enemy_pos2 = &enemy_positions[enemy_index2];
                                     let enemy_size2 = &enemy_sizes[enemy_index2];
 
@@ -1288,13 +1304,17 @@ impl EnemyAggressionSystem {
         player_pos: Vec2,
         enemy_positions: &Vec<Vec2>,
         enemy_velocities: &mut Vec<Vec2>,
-        aggressive_states: &mut Vec<bool>
+        aggressive_states: &mut Vec<bool>,
+        enemy_interactables: & Vec<bool>,
     ) {
         let tile_pos_player = player_pos.trunc();
-        for ((enemy_pos, enemy_vel), is_aggressive) in enemy_positions
+        for (((enemy_pos, enemy_vel), is_aggressive), interactable) in enemy_positions
             .iter()
             .zip(enemy_velocities.iter_mut())
-            .zip(aggressive_states.iter_mut()) {
+            .zip(aggressive_states.iter_mut())
+            .zip(enemy_interactables.iter())
+             {
+            if !interactable {continue;}
             let dist_vector = tile_pos_player - enemy_pos.trunc();
             if dist_vector.length() <= ENEMY_VIEW_DISTANCE {
                 *is_aggressive = true;
@@ -1304,6 +1324,27 @@ impl EnemyAggressionSystem {
                 *enemy_vel = Vec2::new(1.0, -1.0);
             }
         }
+    }
+}
+struct PlayEnemyAnimation;
+impl PlayEnemyAnimation {
+    fn play_death(
+        enemy_handle: EnemyHandle,
+        velocities: &mut Vec<Vec2>,
+        animation_states: &mut Vec<AnimationState>,
+        interactables: &mut Vec<bool>
+    ) {
+        let enemy_animation_state = &mut animation_states[enemy_handle.0 as usize];
+        let velocity = &mut velocities[enemy_handle.0 as usize];
+        let interactable = &mut interactables[enemy_handle.0 as usize];
+        enemy_animation_state.set_callback(AnimationCallbackEvent {
+            event_type: AnimationCallbackEventType::KillEnemy,
+            target_handle: enemy_handle,
+        });
+        enemy_animation_state.set_physics_frames_per_update(20.0);
+        enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
+        *velocity = Vec2::ZERO;
+        *interactable = false;
     }
 }
 struct CameraShake {
@@ -1508,14 +1549,12 @@ impl World {
                         }
 
                         if *health <= self.player.weapon.damage {
-                            let enemy_animation_state =
-                                &mut self.enemies.animation_states[idx.0 as usize];
-                            enemy_animation_state.set_callback(AnimationCallbackEvent {
-                                event_type: AnimationCallbackEventType::KillEnemy,
-                                target_handle: idx,
-                            });
-                            enemy_animation_state.set_physics_frames_per_update(20.0);
-                            enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
+                            PlayEnemyAnimation::play_death(
+                                idx,
+                                &mut self.enemies.velocities,
+                                &mut self.enemies.animation_states,
+                                &mut self.enemies.interactables
+                            );
                             return;
                         }
 
@@ -1621,7 +1660,8 @@ impl World {
             &self.player.pos,
             &self.world_layout,
             &self.enemies.positions,
-            &self.enemies.sizes
+            &self.enemies.sizes,
+            &self.enemies.interactables,
         );
         if let Some(event) = event {
             self.handle_world_event_handle_based(event);
@@ -1630,7 +1670,8 @@ impl World {
             self.player.pos,
             &self.enemies.positions,
             &mut self.enemies.velocities,
-            &mut self.enemies.aggressive_states
+            &mut self.enemies.aggressive_states,
+            &self.enemies.interactables,
         );
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let animation_callback_events = UpdateEnemyAnimation::update(
