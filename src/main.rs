@@ -160,11 +160,11 @@ impl WorldEventHandleBased {
         }
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum AnimationCallbackEventType {
     None,
     KillEnemy,
-    ShootWeaponExplosionFinished,
+    AnimationFinished,
 }
 #[derive(Clone, Copy)]
 enum AllHandleTypes {
@@ -186,6 +186,12 @@ impl AnimationCallbackEvent {
             target_handle: AllHandleTypes::None,
         }
     }
+    fn remove_on_finish() -> Self {
+        AnimationCallbackEvent {
+            event_type: AnimationCallbackEventType::AnimationFinished,
+            target_handle: AllHandleTypes::None,
+        }
+    }
 }
 struct AnimationSprite {
     source: Rect, // what to sample from spritesheet
@@ -200,12 +206,13 @@ enum GeneralAnimation {
 enum AnimationType {
     EnemyAnimationType(EnemyAnimationType),
     GeneralAnimation(GeneralAnimation),
+    None,
 }
 /// blood particles, explosion on weapon if weapon also has animation in general
 struct AnimationEffect {
     animation: AnimationState,
     is_overlay: bool,
-    duration: Option<f32>,
+    loop_for: Option<f32>,
     elapsed_time: f32,
 }
 
@@ -224,7 +231,7 @@ impl CompositeAnimationState {
     fn render_animation_state(&self, state: &AnimationState, position: Vec2, scale: Vec2) {
         let source_rect = state.get_source_rect();
         let flip_x = state.need_to_flip_x();
-        
+
         draw_texture_ex(
             &state.sprite_sheet,
             position.x,
@@ -237,14 +244,19 @@ impl CompositeAnimationState {
                 flip_x,
                 flip_y: false,
                 pivot: None,
-            },
+            }
         );
     }
-    fn add_effect(&mut self, effect: AnimationState, is_overlay: bool, duration: Option<f32>) {
+    fn render_effects(&self, position: Vec2, scale: Vec2) {
+        for effect in &self.effects {
+            self.render_animation_state(&effect.animation, position, scale);
+        }
+    }
+    fn add_effect(&mut self, effect: AnimationState, is_overlay: bool, loop_for: Option<f32>) {
         self.effects.push_back(AnimationEffect {
             animation: effect,
             is_overlay,
-            duration,
+            loop_for,
             elapsed_time: 0.0,
         });
     }
@@ -258,11 +270,17 @@ impl CompositeAnimationState {
         let mut completed_effects = Vec::new();
         for (index, effect) in self.effects.iter_mut().enumerate() {
             let effect_event = effect.animation.next(dt);
-
+            if
+                effect.loop_for.is_none() &&
+                effect_event.event_type == AnimationCallbackEventType::AnimationFinished
+            {
+                completed_effects.push(index);
+                callback_events.push(effect_event);
+                continue;
+            }
             callback_events.push(effect_event);
-
             effect.elapsed_time += dt;
-            if let Some(duration) = effect.duration {
+            if let Some(duration) = effect.loop_for {
                 if effect.elapsed_time >= duration {
                     completed_effects.push(index);
                 }
@@ -289,6 +307,25 @@ struct AnimationState {
     callback_event: AnimationCallbackEvent,
 }
 impl AnimationState {
+    fn default_weapon() -> Self {
+        let texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Weapon).expect(
+            "Failed to load Weapon texture"
+        );
+        const FRAMES_AMOUNT: u16 = 1;
+        let single_sprite_dimension_x = texture.width() / (FRAMES_AMOUNT as f32);
+        AnimationState {
+            frame: 0,
+            frames_amount: FRAMES_AMOUNT,
+            spritesheet_offset_per_frame: Vec2::new(single_sprite_dimension_x, 0.0),
+            sprite_sheet: texture.clone(),
+            color: WHITE,
+            animation_type: AnimationType::None,
+            physics_frames_per_update: 0.0,
+            elapsed_time: 0.0,
+            flip_x: false,
+            callback_event: AnimationCallbackEvent::none(),
+        }
+    }
     fn default_skeleton() -> Self {
         let texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet).expect(
             "Failed to load Skeleton Front Spritesheet"
@@ -329,7 +366,7 @@ impl AnimationState {
             physics_frames_per_update: 0.25 * PHYSICS_FRAME_TIME,
             elapsed_time: 0.0,
             flip_x: false,
-            callback_event: AnimationCallbackEvent::none(),
+            callback_event: AnimationCallbackEvent::remove_on_finish(),
         }
     }
     fn default_blood_particles() -> Self {
@@ -340,6 +377,7 @@ impl AnimationState {
         const ROWS: u16 = 4;
         let single_sprite_dimension_x = texture.width() / (FRAMES_PER_ROW as f32);
         let single_sprite_dimension_y = texture.height() / (ROWS as f32);
+
         AnimationState {
             frame: 0,
             frames_amount: FRAMES_PER_ROW * ROWS,
@@ -353,7 +391,7 @@ impl AnimationState {
             physics_frames_per_update: 0.5 * PHYSICS_FRAME_TIME,
             elapsed_time: 0.0,
             flip_x: false,
-            callback_event: AnimationCallbackEvent::none(),
+            callback_event: AnimationCallbackEvent::remove_on_finish(),
         }
     }
 
@@ -380,6 +418,7 @@ impl AnimationState {
             AnimationType::GeneralAnimation(_) => {
                 return false;
             }
+            AnimationType::None => return false,
         }
     }
     fn get_source_rect(&self) -> Rect {
@@ -586,10 +625,8 @@ impl CallbackHandler {
                     }
                     enemies.destroy_enemy(enemy_idx);
                 }
-                AnimationCallbackEventType::ShootWeaponExplosionFinished => {
-                    player.weapon.animation = None;
-                }
                 AnimationCallbackEventType::None => {}
+                _ => {}
             }
         }
     }
@@ -742,7 +779,6 @@ struct Weapon {
     damage: u8,
     range: u8,
     elapsed_reload_t: u8,
-    animation: Option<AnimationState>,
 }
 impl Weapon {
     fn default() -> Self {
@@ -751,7 +787,6 @@ impl Weapon {
             damage: 1,
             range: 8,
             elapsed_reload_t: 0,
-            animation: None,
         }
     }
 }
@@ -776,6 +811,7 @@ struct Player {
     vel: Vec2,
     health: u16,
     weapon: Weapon,
+    animation_state: CompositeAnimationState,
 }
 impl Player {
     fn shoot(
@@ -1575,31 +1611,22 @@ impl RenderPlayerPOV {
                     }
                 );
             }
-            for effect in &animation.effects {
-               animation.render_animation_state(&effect.animation, Vec2::new(sprite_x + 0.5, screen_y), Vec2::new(1.0, 1.0));
-            }
+
+            animation.render_effects(Vec2::new(sprite_x, screen_y), Vec2::new(1.0, 1.0));
         }
         gl_use_default_material();
     }
 
     #[inline(always)]
-    fn render_weapon(weapon: &Weapon) {
-        let weapon_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Weapon).expect(
-            "Failed to load weapon sprite"
+    fn render_weapon(player: &Player) {
+        let weapon_texture = &player.animation_state.main_state.sprite_sheet;
+        player.animation_state.render_effects(
+            Vec2::new(
+                (SCREEN_WIDTH as f32) * 0.5 - weapon_texture.width() * 0.5,
+                (SCREEN_HEIGHT as f32) * 0.85 - weapon_texture.height()
+            ),
+            Vec2::new(1.0, 1.0)
         );
-        if let Some(animation) = &weapon.animation {
-            draw_texture_ex(
-                &animation.sprite_sheet,
-                (SCREEN_WIDTH as f32) * 0.5 + 16.0, // weapon is not pointing in the center of the texture
-                (SCREEN_HEIGHT as f32) * 0.85 - weapon_texture.height() * 0.85,
-                WHITE,
-                DrawTextureParams {
-                    source: Some(animation.get_source_rect()),
-                    dest_size: Some(Vec2::new(70.0, 70.0)),
-                    ..Default::default()
-                }
-            );
-        }
         draw_texture_ex(
             weapon_texture,
             (SCREEN_WIDTH as f32) * 0.5 - weapon_texture.width() * 0.5,
@@ -1758,6 +1785,7 @@ impl World {
             vel: Vec2::new(0.0, 0.0),
             health: 3,
             weapon: Weapon::default(),
+            animation_state: CompositeAnimationState::new(AnimationState::default_weapon()),
         };
         let layout = config::config::WORLD_LAYOUT;
         let mut world_layout = [[EntityType::None; WORLD_WIDTH]; WORLD_HEIGHT];
@@ -1990,8 +2018,9 @@ impl World {
                 let health = self.enemies.healths
                     .get_mut(event.other_involved as usize)
                     .expect("Invalid handle in world layout");
-                let e_animation_state = &mut self.enemies.animation_states[event.other_involved as usize];
-                e_animation_state.add_effect(AnimationState::default_blood_particles(), true, Some(0.3));
+                let e_animation_state =
+                    &mut self.enemies.animation_states[event.other_involved as usize];
+                e_animation_state.add_effect(AnimationState::default_blood_particles(), true, None);
                 if *health == 0 {
                     // avoid rescheduling animation callback
                     return;
@@ -2033,12 +2062,11 @@ impl World {
                 play_sound_once(&self.reload_sound);
             } else {
                 play_sound_once(&self.shoot_sound);
-                let mut explosion_animation = AnimationState::default_explosion();
-                explosion_animation.set_callback(AnimationCallbackEvent {
-                    event_type: AnimationCallbackEventType::ShootWeaponExplosionFinished,
-                    target_handle: AllHandleTypes::Player,
-                });
-                self.player.weapon.animation = Some(explosion_animation);
+                self.player.animation_state.add_effect(
+                    AnimationState::default_explosion(),
+                    true,
+                    None
+                );
                 self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.2, 10.0));
             }
             if let Some(event) = shoot_event.world_event {
@@ -2079,9 +2107,11 @@ impl World {
         );
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let mut all_animation_callback_events = Vec::new();
-        if let Some(animation) = &mut self.player.weapon.animation {
-            all_animation_callback_events.push(animation.next(PHYSICS_FRAME_TIME));
-        }
+
+        all_animation_callback_events.extend(
+            self.player.animation_state.update(PHYSICS_FRAME_TIME)
+        );
+
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
             &self.enemies.positions,
@@ -2180,9 +2210,8 @@ impl World {
             VisualEffect::None => {}
             _ => todo!(),
         }
-        RenderPlayerPOV::render_weapon(&self.player.weapon);
+        RenderPlayerPOV::render_weapon(&self.player);
         gl_use_default_material();
-
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_and_enemies_on_map(self.player.pos, &self.enemies);
         RenderMap::render_rays(player_ray_origin, &raycast_result);
