@@ -1,6 +1,6 @@
 use core::panic;
-use std::{ collections::{ HashMap }, f32::consts::PI, process::{ exit }, time::Duration };
-use miniquad::{ BlendFactor, BlendState, BlendValue, Equation };
+use std::{ collections::{ HashMap, VecDeque }, f32::consts::PI, process::exit, time::Duration };
+use miniquad::{ BlendFactor, BlendState, BlendValue, Equation, UniformsSource };
 use ::rand::random;
 use config::config::{
     AMOUNT_OF_RAYS,
@@ -201,6 +201,80 @@ enum AnimationType {
     EnemyAnimationType(EnemyAnimationType),
     GeneralAnimation(GeneralAnimation),
 }
+/// blood particles, explosion on weapon if weapon also has animation in general
+struct AnimationEffect {
+    animation: AnimationState,
+    is_overlay: bool,
+    duration: Option<f32>,
+    elapsed_time: f32,
+}
+
+struct CompositeAnimationState {
+    main_state: AnimationState,
+    effects: VecDeque<AnimationEffect>,
+}
+
+impl CompositeAnimationState {
+    fn new(main_state: AnimationState) -> Self {
+        CompositeAnimationState {
+            main_state,
+            effects: VecDeque::new(),
+        }
+    }
+    fn render_animation_state(&self, state: &AnimationState, position: Vec2, scale: Vec2) {
+        let source_rect = state.get_source_rect();
+        let flip_x = state.need_to_flip_x();
+        
+        draw_texture_ex(
+            &state.sprite_sheet,
+            position.x,
+            position.y,
+            state.color,
+            DrawTextureParams {
+                dest_size: Some(vec2(source_rect.w * scale.x, source_rect.h * scale.y)),
+                source: Some(source_rect),
+                rotation: 0.0,
+                flip_x,
+                flip_y: false,
+                pivot: None,
+            },
+        );
+    }
+    fn add_effect(&mut self, effect: AnimationState, is_overlay: bool, duration: Option<f32>) {
+        self.effects.push_back(AnimationEffect {
+            animation: effect,
+            is_overlay,
+            duration,
+            elapsed_time: 0.0,
+        });
+    }
+
+    fn update(&mut self, dt: f32) -> Vec<AnimationCallbackEvent> {
+        let mut callback_events = Vec::new();
+
+        let main_event = self.main_state.next(dt);
+        callback_events.push(main_event);
+
+        let mut completed_effects = Vec::new();
+        for (index, effect) in self.effects.iter_mut().enumerate() {
+            let effect_event = effect.animation.next(dt);
+
+            callback_events.push(effect_event);
+
+            effect.elapsed_time += dt;
+            if let Some(duration) = effect.duration {
+                if effect.elapsed_time >= duration {
+                    completed_effects.push(index);
+                }
+            }
+        }
+        for &index in completed_effects.iter().rev() {
+            self.effects.remove(index);
+        }
+
+        callback_events
+    }
+}
 #[derive(Clone)]
 struct AnimationState {
     frame: u16,
@@ -258,6 +332,31 @@ impl AnimationState {
             callback_event: AnimationCallbackEvent::none(),
         }
     }
+    fn default_blood_particles() -> Self {
+        let texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::BloodAnimationSpriteSheet).expect(
+            "Failed to load Explosion Animation"
+        );
+        const FRAMES_PER_ROW: u16 = 6;
+        const ROWS: u16 = 4;
+        let single_sprite_dimension_x = texture.width() / (FRAMES_PER_ROW as f32);
+        let single_sprite_dimension_y = texture.height() / (ROWS as f32);
+        AnimationState {
+            frame: 0,
+            frames_amount: FRAMES_PER_ROW * ROWS,
+            spritesheet_offset_per_frame: Vec2::new(
+                single_sprite_dimension_x,
+                single_sprite_dimension_y
+            ),
+            sprite_sheet: texture.clone(),
+            color: WHITE,
+            animation_type: AnimationType::GeneralAnimation(GeneralAnimation::Blood),
+            physics_frames_per_update: 0.5 * PHYSICS_FRAME_TIME,
+            elapsed_time: 0.0,
+            flip_x: false,
+            callback_event: AnimationCallbackEvent::none(),
+        }
+    }
+
     fn set_physics_frames_per_update(&mut self, frames: f32) {
         self.physics_frames_per_update = frames * PHYSICS_FRAME_TIME;
     }
@@ -308,16 +407,16 @@ impl AnimationState {
     fn next(&mut self, dt: f32) -> AnimationCallbackEvent {
         let mut frames_per_dt = 1.0;
         if self.physics_frames_per_update < dt {
-             frames_per_dt = dt / self.physics_frames_per_update;
+            frames_per_dt = dt / self.physics_frames_per_update;
         }
         self.elapsed_time += dt;
         let mut callback_event = AnimationCallbackEvent::none();
 
         if self.elapsed_time > self.physics_frames_per_update {
-            if self.frame + frames_per_dt as u16 == self.frames_amount {
+            if self.frame + (frames_per_dt as u16) == self.frames_amount {
                 callback_event = self.callback_event;
             }
-            self.frame = (self.frame + frames_per_dt as u16) % self.frames_amount;
+            self.frame = (self.frame + (frames_per_dt as u16)) % self.frames_amount;
             self.elapsed_time = 0.0;
         }
         return callback_event;
@@ -355,7 +454,7 @@ impl UpdateEnemyAnimation {
         enemy_positions: &Vec<Vec2>,
         aggressive_states: &Vec<bool>,
         velocities: &Vec<Vec2>,
-        animation_states: &mut Vec<AnimationState>
+        animation_states: &mut Vec<CompositeAnimationState>
     ) -> Vec<AnimationCallbackEvent> {
         let mut res: Vec<AnimationCallbackEvent> = Vec::new();
         for (((enemy_pos, velocity), is_aggressive), animation_state) in enemy_positions
@@ -363,15 +462,15 @@ impl UpdateEnemyAnimation {
             .zip(velocities.iter())
             .zip(aggressive_states.iter())
             .zip(animation_states.iter_mut()) {
-            let callback_event = animation_state.next(PHYSICS_FRAME_TIME);
-            res.push(callback_event);
+            let callback_event = animation_state.update(PHYSICS_FRAME_TIME);
+            res.extend(callback_event);
 
             if *is_aggressive {
                 if
-                    animation_state.animation_type !=
+                    animation_state.main_state.animation_type !=
                     AnimationType::EnemyAnimationType(EnemyAnimationType::SkeletonFront)
                 {
-                    animation_state.change_animation(
+                    animation_state.main_state.change_animation(
                         TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
                             .expect("Failed to load spritesheet skeleton")
                             .clone(),
@@ -386,10 +485,10 @@ impl UpdateEnemyAnimation {
             match vel_enemy_rel_player {
                 angle if angle > 0.0 && angle < std::f32::consts::FRAC_PI_4 => {
                     if
-                        animation_state.animation_type !=
+                        animation_state.main_state.animation_type !=
                         AnimationType::EnemyAnimationType(EnemyAnimationType::SkeletonSide)
                     {
-                        animation_state.change_animation(
+                        animation_state.main_state.change_animation(
                             TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
@@ -397,14 +496,14 @@ impl UpdateEnemyAnimation {
                             Vec2::new(31.0, 0.0)
                         );
                     }
-                    animation_state.flip_x = true;
+                    animation_state.main_state.flip_x = true;
                 }
                 angle if angle <= 0.0 && angle > -PI => {
                     if
-                        animation_state.animation_type !=
+                        animation_state.main_state.animation_type !=
                         AnimationType::EnemyAnimationType(EnemyAnimationType::SkeletonSide)
                     {
-                        animation_state.change_animation(
+                        animation_state.main_state.change_animation(
                             TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonSideSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
@@ -412,17 +511,17 @@ impl UpdateEnemyAnimation {
                             Vec2::new(31.0, 0.0)
                         );
                     }
-                    animation_state.flip_x = false;
+                    animation_state.main_state.flip_x = false;
                 }
                 angle if
                     (angle > 0.0 && angle > std::f32::consts::FRAC_2_PI) ||
                     (angle < 0.0 && angle > -std::f32::consts::FRAC_2_PI)
                 => {
                     if
-                        animation_state.animation_type !=
+                        animation_state.main_state.animation_type !=
                         AnimationType::EnemyAnimationType(EnemyAnimationType::SkeletonBack)
                     {
-                        animation_state.change_animation(
+                        animation_state.main_state.change_animation(
                             TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonBackSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
@@ -433,10 +532,10 @@ impl UpdateEnemyAnimation {
                 }
                 _ => {
                     if
-                        animation_state.animation_type !=
+                        animation_state.main_state.animation_type !=
                         AnimationType::EnemyAnimationType(EnemyAnimationType::SkeletonFront)
                     {
-                        animation_state.change_animation(
+                        animation_state.main_state.change_animation(
                             TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::SkeletonFrontSpriteSheet)
                                 .expect("Failed to load spritesheet skeleton")
                                 .clone(),
@@ -544,7 +643,6 @@ struct EnemyInformation {
     vel: Vec2,
     health: u8,
     size: Vec2,
-    animation_state: AnimationState,
     aggressive: bool,
     interactable: bool,
 }
@@ -553,7 +651,7 @@ struct Enemies {
     velocities: Vec<Vec2>,
     healths: Vec<u8>,
     sizes: Vec<Vec2>,
-    animation_states: Vec<AnimationState>,
+    animation_states: Vec<CompositeAnimationState>,
     aggressive_states: Vec<bool>,
     collision_data: CollisionData,
     interactables: Vec<bool>,
@@ -586,7 +684,10 @@ impl Enemies {
         self.velocities.push(velocity);
         self.healths.push(health);
         self.sizes.push(size);
-        self.animation_states.push(animation);
+        self.animation_states.push(CompositeAnimationState {
+            main_state: animation,
+            effects: VecDeque::new(),
+        });
         self.collision_data.x_collisions.push(0);
         self.collision_data.y_collisions.push(0);
         self.collision_data.collision_times.push(Duration::from_secs(0));
@@ -614,10 +715,6 @@ impl Enemies {
             vel: *self.velocities.get(idx).expect("Tried to acccess invalid enemy idx"),
             health: *self.healths.get(idx).expect("Tried to acccess invalid enemy idx"),
             size: *self.sizes.get(idx).expect("Tried to acccess invalid enemy idx"),
-            animation_state: self.animation_states
-                .get(idx)
-                .expect("Tried to acccess invalid enemy idx")
-                .clone(),
             aggressive: *self.aggressive_states
                 .get(idx)
                 .expect("Tried to acccess invalid enemy idx"),
@@ -634,8 +731,6 @@ impl Enemies {
             enemy_information.health;
         *self.sizes.get_mut(idx).expect("Invalid enemy information update") =
             enemy_information.size;
-        *self.animation_states.get_mut(idx).expect("Invalid enemy information update") =
-            enemy_information.animation_state;
         *self.aggressive_states.get_mut(idx).expect("Invalid enemy information update") =
             enemy_information.aggressive;
         *self.interactables.get_mut(idx).expect("Invalid enemy information update") =
@@ -1407,7 +1502,7 @@ impl RenderPlayerPOV {
         player_pos: Vec2,
         enemies: &Vec<SeenEnemy>,
         positions: &Vec<Vec2>,
-        animation_states: &Vec<AnimationState>,
+        animation_states: &Vec<CompositeAnimationState>,
         healths: &Vec<u8>
     ) {
         gl_use_material(material);
@@ -1424,22 +1519,26 @@ impl RenderPlayerPOV {
                 SCREEN_HEIGHT as f32
             );
             let screen_y = HALF_SCREEN_HEIGHT - sprite_height / 2.0;
-            let texture_width = animation.spritesheet_offset_per_frame.x;
-            let growth_factor = sprite_height / animation.sprite_sheet.height();
+            let texture_width = animation.main_state.spritesheet_offset_per_frame.x;
+            let growth_factor = sprite_height / animation.main_state.sprite_sheet.height();
             let aspect_ratio =
-                animation.spritesheet_offset_per_frame.x / animation.sprite_sheet.height();
+                animation.main_state.spritesheet_offset_per_frame.x /
+                animation.main_state.sprite_sheet.height();
             let shade =
                 1.0 - (distance_to_player / (WORLD_WIDTH.min(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
             let color = Color::new(
-                animation.color.r * shade,
-                animation.color.g * shade,
-                animation.color.b * shade,
+                animation.main_state.color.r * shade,
+                animation.main_state.color.g * shade,
+                animation.main_state.color.b * shade,
                 1.0
             );
             let curr_animation_text_coord_x =
-                animation.spritesheet_offset_per_frame.x * (animation.frame as f32);
+                animation.main_state.spritesheet_offset_per_frame.x *
+                (animation.main_state.frame as f32);
 
-            let x_range: Box<dyn Iterator<Item = usize>> = if animation.need_to_flip_x() {
+            let x_range: Box<dyn Iterator<Item = usize>> = if
+                animation.main_state.need_to_flip_x()
+            {
                 Box::new((0..texture_width as usize).rev())
             } else {
                 Box::new(0..texture_width as usize)
@@ -1453,7 +1552,7 @@ impl RenderPlayerPOV {
                 {
                     continue;
                 }
-                let source_x = if animation.need_to_flip_x() {
+                let source_x = if animation.main_state.need_to_flip_x() {
                     curr_animation_text_coord_x + (texture_width - 1.0 - (x as f32))
                 } else {
                     curr_animation_text_coord_x + (x as f32)
@@ -1462,10 +1561,10 @@ impl RenderPlayerPOV {
                     x: source_x,
                     y: 0.0,
                     w: 1.0,
-                    h: animation.sprite_sheet.height(),
+                    h: animation.main_state.sprite_sheet.height(),
                 };
                 draw_texture_ex(
-                    &animation.sprite_sheet,
+                    &animation.main_state.sprite_sheet,
                     screen_x,
                     screen_y,
                     color,
@@ -1475,6 +1574,9 @@ impl RenderPlayerPOV {
                         ..Default::default()
                     }
                 );
+            }
+            for effect in &animation.effects {
+               animation.render_animation_state(&effect.animation, Vec2::new(sprite_x + 0.5, screen_y), Vec2::new(1.0, 1.0));
             }
         }
         gl_use_default_material();
@@ -1564,18 +1666,18 @@ impl PlayEnemyAnimation {
     fn play_death(
         enemy_handle: EnemyHandle,
         velocities: &mut Vec<Vec2>,
-        animation_states: &mut Vec<AnimationState>,
+        animation_states: &mut Vec<CompositeAnimationState>,
         interactables: &mut Vec<bool>
     ) {
         let enemy_animation_state = &mut animation_states[enemy_handle.0 as usize];
         let velocity = &mut velocities[enemy_handle.0 as usize];
         let interactable = &mut interactables[enemy_handle.0 as usize];
-        enemy_animation_state.set_callback(AnimationCallbackEvent {
+        enemy_animation_state.main_state.set_callback(AnimationCallbackEvent {
             event_type: AnimationCallbackEventType::KillEnemy,
             target_handle: AllHandleTypes::EnemyHandle(enemy_handle),
         });
-        enemy_animation_state.set_physics_frames_per_update(20.0);
-        enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
+        enemy_animation_state.main_state.set_physics_frames_per_update(20.0);
+        enemy_animation_state.main_state.color = Color::from_rgba(255, 0, 0, 255);
         *velocity = Vec2::ZERO;
         *interactable = false;
     }
@@ -1888,6 +1990,8 @@ impl World {
                 let health = self.enemies.healths
                     .get_mut(event.other_involved as usize)
                     .expect("Invalid handle in world layout");
+                let e_animation_state = &mut self.enemies.animation_states[event.other_involved as usize];
+                e_animation_state.add_effect(AnimationState::default_blood_particles(), true, Some(0.3));
                 if *health == 0 {
                     // avoid rescheduling animation callback
                     return;
