@@ -1612,7 +1612,7 @@ impl RenderPlayerPOV {
                 );
             }
 
-            animation.render_effects(Vec2::new(sprite_x, screen_y), Vec2::new(1.0, 1.0));
+            animation.render_effects(Vec2::new(sprite_x, screen_y), Vec2::new(1.5, 1.5));
         }
         gl_use_default_material();
     }
@@ -1622,10 +1622,10 @@ impl RenderPlayerPOV {
         let weapon_texture = &player.animation_state.main_state.sprite_sheet;
         player.animation_state.render_effects(
             Vec2::new(
-                (SCREEN_WIDTH as f32) * 0.5 - weapon_texture.width() * 0.5,
+                (SCREEN_WIDTH as f32) * 0.5 - 50.0,
                 (SCREEN_HEIGHT as f32) * 0.85 - weapon_texture.height()
             ),
-            Vec2::new(1.0, 1.0)
+            Vec2::new(0.75, 0.75)
         );
         draw_texture_ex(
             weapon_texture,
