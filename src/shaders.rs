@@ -1,6 +1,6 @@
 pub mod shaders {
     pub const DEFAULT_VERTEX_SHADER: &'static str =
-"#version 100
+        "#version 100
 precision lowp float;
 
 attribute vec3 position;
@@ -17,7 +17,7 @@ void main() {
 }
 ";
     pub const FLOOR_FRAGMENT_SHADER: &'static str =
-"#version 330 core
+        "#version 330 core
 
 uniform vec2 u_player_pos;
 uniform vec2 u_left_ray_dir;
@@ -40,6 +40,40 @@ void main()
     vec4 tex_color = texture(u_floor_texture, tex_coords);
     float shade = clamp(1.0 - (row_distance / 15), 0.0, 1.0);
     FragColor = vec4(tex_color.rgb * shade, 1.0);
+}
+";
+    pub const CAMERA_SHAKE_VERTEX_SHADER: &'static str =
+        "#version 100
+precision lowp float;
+
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+uniform vec2 screen_size;
+uniform vec2 shake_offset;
+varying vec2 uv;
+varying vec4 color;
+
+void main() {
+    vec4 modelPosition = vec4(position.xy + shake_offset, position.z, 1.0);
+    modelPosition.xy /= screen_size / 2.0;
+    modelPosition.xy -= 1.0;
+    modelPosition.y *= -1.0;
+
+    gl_Position = modelPosition;
+
+    uv = texcoord;
+    color = color0 / 255.0;
+    }   
+";
+    pub const DEFAULT_FRAGMENT_SHADER: &'static str =
+        "#version 100
+precision lowp float;
+varying vec2 uv;
+varying vec4 color;
+uniform sampler2D Texture;
+void main() {
+    gl_FragColor = color * texture2D(Texture, uv);
 }
 ";
 }

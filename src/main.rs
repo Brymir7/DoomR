@@ -1,32 +1,19 @@
 use core::panic;
-use std::{ collections::{ HashMap, HashSet }, f32::consts::PI, process::id, time::Duration };
-
+use std::{
+    collections::{ HashMap },
+    f32::consts::PI,
+    process::{ exit },
+    time::Duration,
+};
+use miniquad::{BlendFactor, BlendState, BlendValue, Equation};
+use ::rand::random;
 use config::config::{
-    AMOUNT_OF_RAYS,
-    ENEMY_VIEW_DISTANCE,
-    HALF_PLAYER_FOV,
-    HALF_SCREEN_HEIGHT,
-    HALF_SCREEN_WIDTH,
-    LEFT_MOST_RAY,
-    MAP_X_OFFSET,
-    PHYSICS_FRAME_TIME,
-    PLAYER_FOV,
-    RAY_VERTICAL_STRIPE_WIDTH,
-    RIGHT_MOST_RAY,
-    SCREEN_HEIGHT,
-    SCREEN_WIDTH,
-    TILE_SIZE_X_PIXEL,
-    TILE_SIZE_Y_PIXEL,
-    WORLD_HEIGHT,
-    WORLD_LAYOUT,
-    WORLD_WIDTH,
+    AMOUNT_OF_RAYS, ENEMY_VIEW_DISTANCE, HALF_PLAYER_FOV, HALF_SCREEN_HEIGHT, MAP_X_OFFSET, PHYSICS_FRAME_TIME, PLAYER_FOV, RAY_VERTICAL_STRIPE_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, TILE_SIZE_X_PIXEL, TILE_SIZE_Y_PIXEL, WORLD_HEIGHT, WORLD_WIDTH
 };
 use image_utils::load_and_convert_texture;
-const MAX_ENEMIES: usize = WORLD_WIDTH * WORLD_HEIGHT;
-use miniquad::date;
 use once_cell::sync::Lazy;
 use macroquad::{ audio::{ load_sound, play_sound_once, Sound }, prelude::* };
-use shaders::shaders::{ DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER };
+use shaders::shaders::{ DEFAULT_FRAGMENT_SHADER, DEFAULT_VERTEX_SHADER, FLOOR_FRAGMENT_SHADER, CAMERA_SHAKE_VERTEX_SHADER } ;
 pub mod config;
 pub mod shaders;
 pub mod image_utils;
@@ -41,7 +28,7 @@ enum Textures {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct EnemyHandle(pub u16);
-const INVALID_ENEMY_HANDLE: EnemyHandle = EnemyHandle(u16::MAX);
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct WallHandle(pub u16);
 
@@ -124,18 +111,38 @@ impl Tile {
         }
     }
 }
-struct WorldEvent {
+struct WorldEventTileBased {
     event_type: WorldEventType,
     triggered_by_tile_handle: Tile,
     target_tile_handle: Tile,
 }
-impl WorldEvent {
+impl WorldEventTileBased {
     fn player_hit_enemy(player_handle: Tile, enemy_handle: Tile) -> Self {
-        return WorldEvent {
+        return WorldEventTileBased {
             event_type: WorldEventType::PlayerHitEnemy,
             triggered_by_tile_handle: player_handle,
             target_tile_handle: enemy_handle,
         };
+    }
+    fn enemy_hit_player(player_handle: Tile, enemy_handle: Tile) -> Self {
+        return WorldEventTileBased {
+            event_type: WorldEventType::PlayerHitEnemy,
+            triggered_by_tile_handle: enemy_handle,
+            target_tile_handle: player_handle,
+        };
+    }
+}
+struct WorldEventHandleBased { // to avoid multiple tile lookups and inaccuracies due to rounding when intersecting for example
+    event_type: WorldEventType,
+
+    other_involved: u16,
+}
+impl WorldEventHandleBased {
+    fn EnemyHitPlayer(enemy_handle: EnemyHandle) -> Self {
+        WorldEventHandleBased {
+            event_type: WorldEventType::EnemyHitPlayer,
+            other_involved: enemy_handle.0,
+        }
     }
 }
 #[derive(Clone, Copy)]
@@ -512,7 +519,6 @@ impl Weapon {
 struct WeaponSystem;
 impl WeaponSystem {
     fn update_reload(player_weapon: &mut Weapon) {
-        println!("elapsed time {}", player_weapon.elapsed_reload_t);
         if player_weapon.elapsed_reload_t > 0 {
             player_weapon.elapsed_reload_t += 1;
         }
@@ -522,7 +528,7 @@ impl WeaponSystem {
     }
 }
 struct ShootEvent {
-    world_event: Option<WorldEvent>,
+    world_event: Option<WorldEventTileBased>,
     still_reloading: bool,
 }
 struct Player {
@@ -555,11 +561,11 @@ impl Player {
                         .get(enemy.0 as usize)
                         .expect("Invalid enemy handle");
                     let enemy_dist = self.pos.distance(*enemy_pos);
-                    let event = if enemy_dist.round() as u32 > self.weapon.range as u32 {
+                    let event = if (enemy_dist.round() as u32) > (self.weapon.range as u32) {
                         None
                     } else {
                         Some(
-                            WorldEvent::player_hit_enemy(
+                            WorldEventTileBased::player_hit_enemy(
                                 Tile::from_vec2(self.pos),
                                 Tile::from_vec2(*enemy_pos)
                             )
@@ -579,7 +585,109 @@ impl Player {
         };
     }
 }
+struct MovingEntityCollisionSystem;
 
+impl MovingEntityCollisionSystem {
+    fn check_player_enemy_collisions(
+        player_pos: &Vec2,
+        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        enemy_positions: &Vec<Vec2>,
+        enemy_sizes: &Vec<Vec2>
+    ) -> Option<WorldEventHandleBased> {
+        let player_size = Vec2::new(1.0, 1.0);
+        let check_radius = 2; // Adjust this value based on the maximum enemy size
+
+        let start_x = ((player_pos.x as i32) - check_radius).max(0) as usize;
+        let end_x = ((player_pos.x as i32) + check_radius + 1).min(WORLD_WIDTH as i32) as usize;
+        let start_y = ((player_pos.y as i32) - check_radius).max(0) as usize;
+        let end_y = ((player_pos.y as i32) + check_radius + 1).min(WORLD_HEIGHT as i32) as usize;
+
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                if let EntityType::Enemy(enemy_handle) = world_layout[y][x] {
+                    let enemy_index = enemy_handle.0 as usize;
+                    let enemy_pos = &enemy_positions[enemy_index];
+                    let enemy_size = &enemy_sizes[enemy_index];
+
+                    if Self::check_collision(player_pos, &player_size, enemy_pos, enemy_size) {
+                        return Some(WorldEventHandleBased::EnemyHitPlayer(enemy_handle));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn check_enemy_enemy_collisions(
+        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        enemy_positions: &Vec<Vec2>,
+        enemy_sizes: &Vec<Vec2>
+    ) -> Vec<(EnemyHandle, EnemyHandle)> {
+        let mut collisions = Vec::new();
+        let check_radius = 2; // Adjust this value based on the maximum enemy size
+
+        for y in 0..WORLD_HEIGHT {
+            for x in 0..WORLD_WIDTH {
+                if let EntityType::Enemy(enemy_handle1) = world_layout[y][x] {
+                    let enemy_index1 = enemy_handle1.0 as usize;
+                    let enemy_pos1 = &enemy_positions[enemy_index1];
+                    let enemy_size1 = &enemy_sizes[enemy_index1];
+
+                    let start_x = ((enemy_pos1.x as i32) - check_radius).max(0) as usize;
+                    let end_x = ((enemy_pos1.x as i32) + check_radius + 1).min(
+                        WORLD_WIDTH as i32
+                    ) as usize;
+                    let start_y = ((enemy_pos1.y as i32) - check_radius).max(0) as usize;
+                    let end_y = ((enemy_pos1.y as i32) + check_radius + 1).min(
+                        WORLD_HEIGHT as i32
+                    ) as usize;
+
+                    for check_y in start_y..end_y {
+                        for check_x in start_x..end_x {
+                            if
+                                let EntityType::Enemy(enemy_handle2) =
+                                    world_layout[check_y][check_x]
+                            {
+                                if enemy_handle1 != enemy_handle2 {
+                                    let enemy_index2 = enemy_handle2.0 as usize;
+                                    let enemy_pos2 = &enemy_positions[enemy_index2];
+                                    let enemy_size2 = &enemy_sizes[enemy_index2];
+
+                                    if
+                                        Self::check_collision(
+                                            enemy_pos1,
+                                            enemy_size1,
+                                            enemy_pos2,
+                                            enemy_size2
+                                        )
+                                    {
+                                        collisions.push((enemy_handle1, enemy_handle2));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        collisions
+    }
+
+    fn check_collision(pos1: &Vec2, size1: &Vec2, pos2: &Vec2, size2: &Vec2) -> bool {
+        let center1 = Vec2::new(pos1.x + size1.x / 2.0, pos1.y + size1.y / 2.0);
+        let center2 = Vec2::new(pos2.x + size2.x / 2.0, pos2.y + size2.y / 2.0);
+
+        let distance_x = (center1.x - center2.x).abs();
+        let distance_y = (center1.y - center2.y).abs();
+
+        let min_distance_x = (size1.x + size2.x) / 2.0;
+        let min_distance_y = (size1.y + size2.y) / 2.0;
+
+        distance_x < min_distance_x && distance_y < min_distance_y
+    }
+}
 struct MovementSystem;
 impl MovementSystem {
     fn update_enemies(
@@ -884,6 +992,7 @@ impl RaycastSystem {
 }
 struct RenderMap;
 impl RenderMap {
+    #[inline(always)]
     fn render_world_layout(world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) {
         draw_rectangle(MAP_X_OFFSET, 0.0, (SCREEN_WIDTH as f32) - MAP_X_OFFSET, 270.0, GRAY);
         for y in 0..WORLD_HEIGHT {
@@ -904,6 +1013,7 @@ impl RenderMap {
             }
         }
     }
+    #[inline(always)]
     fn render_player_and_enemies_on_map(player_pos: Vec2, enemies: &Enemies) {
         draw_rectangle(
             player_pos.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
@@ -935,6 +1045,7 @@ impl RenderMap {
             );
         }
     }
+    #[inline(always)]
     fn render_rays(player_origin: Vec2, raycast_result: &Vec<RaycastStepResult>) {
         for result in raycast_result.iter() {
             draw_line(
@@ -951,6 +1062,7 @@ impl RenderMap {
 }
 struct RenderPlayerPOV;
 impl RenderPlayerPOV {
+    #[inline(always)]
     fn render_floor(material: &Material, player_angle: f32, player_pos: Vec2) {
         let left_most_ray_dir = Vec2::new(
             (player_angle + HALF_PLAYER_FOV).cos(),
@@ -991,7 +1103,7 @@ impl RenderPlayerPOV {
         );
         gl_use_default_material();
     }
-
+    #[inline(always)]
     fn render_walls(
         raycast_step_res: &Vec<RaycastStepResult>,
         z_buffer: &mut [f32; AMOUNT_OF_RAYS]
@@ -1049,6 +1161,7 @@ impl RenderPlayerPOV {
             );
         }
     }
+    #[inline(always)]
     fn render_enemies(
         z_buffer: &[f32; AMOUNT_OF_RAYS],
         player_pos: Vec2,
@@ -1120,6 +1233,7 @@ impl RenderPlayerPOV {
             }
         }
     }
+    #[inline(always)]
     fn render_weapon() {
         let weapon_texture = TEXTURE_TYPE_TO_TEXTURE2D.get(&Textures::Weapon).expect(
             "Failed to load weapon sprite"
@@ -1179,14 +1293,49 @@ impl EnemyAggressionSystem {
         }
     }
 }
+struct CameraShake {
+    duration: f32,
+    intensity: f32,
+    current_time: f32,
+}
+
+impl CameraShake {
+    fn new(duration: f32, intensity: f32) -> Self {
+        Self {
+            duration,
+            intensity,
+            current_time: 0.0,
+        }
+    }
+
+    fn update(&mut self, dt: f32) -> Vec2 {
+        if self.current_time >= self.duration {
+            return Vec2::ZERO;
+        }
+        self.current_time += dt;
+        let progress = self.current_time / self.duration;
+        let damping = 1.0 - progress;
+
+        let angle = random::<f32>() * std::f32::consts::TAU;
+        let offset = Vec2::new(angle.cos(), angle.sin()) * self.intensity * damping;
+        offset
+    }
+}
+enum VisualEffect {
+    CameraShake(CameraShake),
+    BloodyScreen,
+    None
+}
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
     background_material: Material,
+    camera_shake_material: Material,
     shoot_sound: Sound,
     reload_sound: Sound,
     walls: Vec<Vec2>,
     enemies: Enemies,
     player: Player,
+    postprocessing: VisualEffect,
 }
 impl World {
     async fn default() -> Self {
@@ -1233,7 +1382,7 @@ impl World {
             }
         }
 
-        let material = load_material(
+        let background_material = load_material(
             ShaderSource::Glsl {
                 vertex: &DEFAULT_VERTEX_SHADER,
                 fragment: &FLOOR_FRAGMENT_SHADER,
@@ -1280,20 +1429,56 @@ impl World {
                 ..Default::default()
             }
         ).unwrap();
+        let camera_shake_material = load_material(
+            ShaderSource::Glsl {
+                vertex: &CAMERA_SHAKE_VERTEX_SHADER,
+                fragment: &DEFAULT_FRAGMENT_SHADER,
+            },
+            MaterialParams {
+                uniforms: vec![
+                    UniformDesc {
+                        name: "screen_size".to_string(),
+                        uniform_type: UniformType::Float2,
+                        array_count: 1,
+                    },
+                    UniformDesc {
+                        name: "shake_offset".to_string(),
+                        uniform_type: UniformType::Float2,
+                        array_count: 1,
+                    },
+                ],
+                pipeline_params: PipelineParams {
+                    color_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Value(BlendValue::SourceAlpha),
+                        BlendFactor::OneMinusValue(BlendValue::SourceAlpha))
+                    ),
+                    alpha_blend: Some(BlendState::new(
+                        Equation::Add,
+                        BlendFactor::Zero,
+                        BlendFactor::One)
+                    ),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        ).unwrap();
         let shoot_sound = load_sound("sounds/pistol_shoot.wav").await.unwrap();
         let reload_sound = load_sound("sounds/reload.wav").await.unwrap();
         Self {
             world_layout,
-            background_material: material,
+            background_material: background_material,
+            camera_shake_material: camera_shake_material,
             walls,
             enemies,
             player,
             shoot_sound,
             reload_sound,
+            postprocessing: VisualEffect::None,
         }
     }
 
-    fn handle_game_event(&mut self, event: WorldEvent) {
+    fn handle_world_event_tile_based(&mut self, event: WorldEventTileBased) {
         match event.event_type {
             WorldEventType::PlayerHitEnemy => {
                 let enemy_handle: EntityType =
@@ -1326,9 +1511,65 @@ impl World {
                     _ => panic!("Hit invalid enemy"),
                 }
             }
-            _ => panic!("Unahndled game event"),
+            WorldEventType::EnemyHitPlayer => {
+                let enemy_handle: EntityType =
+                    self.world_layout[event.triggered_by_tile_handle.y as usize]
+                        [event.triggered_by_tile_handle.x as usize];
+                match enemy_handle {
+                    EntityType::Enemy(idx) => {
+                        self.player.pos =
+                            self.player.pos + self.enemies.velocities[idx.0 as usize] * 5.0; // move player away
+                        if self.player.health == 1 {
+                            exit(1);
+                        }
+                        self.player.health -= 1;
+                        self.postprocessing = VisualEffect::CameraShake(
+                            CameraShake::new(0.5, 10.0)
+                        );
+                    }
+                    _ => panic!("Hit invalid enemy"),
+                }
+            }
         }
     }
+    fn move_player(&mut self, delta: Vec2) {
+
+        let old_pos = self.player.pos;
+        
+
+        self.player.pos += delta;
+        
+
+        let old_tile_x = old_pos.x.floor() as usize;
+        let old_tile_y = old_pos.y.floor() as usize;
+        let new_tile_x = self.player.pos.x.floor() as usize;
+        let new_tile_y = self.player.pos.y.floor() as usize;
+        
+
+        if (old_tile_x != new_tile_x) || (old_tile_y != new_tile_y) {
+
+            if self.world_layout[old_tile_y][old_tile_x] == EntityType::Player {
+                self.world_layout[old_tile_y][old_tile_x] = EntityType::None;
+            }
+            self.world_layout[new_tile_y][new_tile_x] = EntityType::Player;
+        }
+    }
+    fn handle_world_event_handle_based(&mut self, event: WorldEventHandleBased) {
+        match event.event_type {
+            WorldEventType::EnemyHitPlayer => {
+                self.move_player(self.enemies.velocities[event.other_involved as usize] * 0.5); // move player away
+                if self.player.health == 1 {
+                    exit(1);
+                }
+                self.player.health -= 1;
+                self.postprocessing = VisualEffect::CameraShake(
+                    CameraShake::new(0.5, 10.0)
+                );
+            },
+            WorldEventType::PlayerHitEnemy => todo!()
+        }
+    }
+
     fn handle_input(&mut self) {
         if is_key_down(KeyCode::W) {
             self.player.vel = Vec2::new(self.player.angle.cos(), self.player.angle.sin()) * 2.0;
@@ -1353,7 +1594,7 @@ impl World {
                 play_sound_once(&self.shoot_sound);
             }
             if let Some(event) = shoot_event.world_event {
-                self.handle_game_event(event);
+                self.handle_world_event_tile_based(event);
             }
         }
     }
@@ -1370,6 +1611,15 @@ impl World {
             &mut self.world_layout,
             Duration::from_secs_f32(get_time() as f32)
         );
+        let event = MovingEntityCollisionSystem::check_player_enemy_collisions(
+            &self.player.pos,
+            &self.world_layout,
+            &self.enemies.positions,
+            &self.enemies.sizes
+        );
+        if let Some(event) = event {
+            self.handle_world_event_handle_based(event);
+        }
         EnemyAggressionSystem::toggle_enemy_aggressive(
             self.player.pos,
             &self.enemies.positions,
@@ -1391,7 +1641,9 @@ impl World {
             &mut self.enemies
         );
     }
-    fn draw(&self) {
+
+    fn draw(&mut self) {
+
         clear_background(LIGHTGRAY);
         let player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
         let start_time: f64 = get_time();
@@ -1407,6 +1659,29 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
+
+        let shake_offset = CameraShake::new(1.0, 5.0).update(get_frame_time());
+        self.camera_shake_material.set_uniform("screen_size", Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
+        self.camera_shake_material.set_uniform("shake_offset", shake_offset);
+
+
+        if shake_offset == Vec2::ZERO {
+            self.postprocessing = VisualEffect::None;
+        }        match &mut self.postprocessing {
+            VisualEffect::CameraShake( shake) => {
+                // gl_use_material(&self.camera_shake_material);
+                // let shake_offset = shake.update(get_frame_time());
+                // println!("Shake offset {}", shake_offset);
+                // self.camera_shake_material.set_uniform("screen_size", Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32));
+                // self.camera_shake_material.set_uniform("shake_offset", shake_offset);
+                // if shake_offset == Vec2::ZERO {
+                //     self.postprocessing = VisualEffect::None;
+                // }
+            }
+            VisualEffect::None => {}
+            _ => todo!()
+        }
+        gl_use_material(&self.camera_shake_material);
         let mut z_buffer = [f32::MAX; AMOUNT_OF_RAYS as usize];
         RenderPlayerPOV::render_walls(&raycast_result, &mut z_buffer);
         let mut seen_enemies = Vec::new();
@@ -1443,7 +1718,7 @@ impl World {
                     _ => {}
                 }
             }
-        }
+        } 
         RenderPlayerPOV::render_enemies(
             &z_buffer,
             self.player.pos,
@@ -1452,10 +1727,10 @@ impl World {
             &self.enemies.animation_states
         );
         RenderPlayerPOV::render_weapon();
+        gl_use_default_material();
         RenderMap::render_world_layout(&self.world_layout);
         RenderMap::render_player_and_enemies_on_map(self.player.pos, &self.enemies);
         RenderMap::render_rays(player_ray_origin, &raycast_result);
-
         draw_text(&format!("Raycasting FPS: {}", 1.0 / elapsed_time), 10.0, 30.0, 20.0, RED);
     }
 }
@@ -1464,7 +1739,6 @@ async fn main() {
     let mut elapsed_time = 0.0;
     let mut world = World::default().await;
     loop {
-        clear_background(BLACK);
         elapsed_time += get_frame_time();
         world.handle_input();
         if elapsed_time > PHYSICS_FRAME_TIME {
