@@ -76,4 +76,54 @@ void main() {
     gl_FragColor = color * texture2D(Texture, uv);
 }
 ";
+pub const ENEMY_DEFAULT_VERTEX_SHADER: &'static str =
+"#version 100
+precision lowp float;
+
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+
+uniform vec2 screen_size;
+varying vec2 uv;
+varying vec4 color;
+
+void main() {
+    vec4 modelPosition = vec4(position, 1);
+
+    modelPosition.xy /= screen_size / 2.0;
+    modelPosition.xy -= 1.0;
+    modelPosition.y *= -1.0;
+
+    gl_Position = modelPosition;
+    uv = texcoord;
+    color = color0 / 255.0;
 }
+";
+pub const ENEMY_DEFAULT_FRAGMENT_SHADER: &'static str =
+"#version 100
+precision lowp float;
+uniform float u_relative_health;
+uniform sampler2D Texture;
+
+varying vec2 uv;
+varying vec4 color;
+
+void main() {
+    vec4 textureColor = texture2D(Texture, uv);
+    float redIntensity = (1.0 - u_relative_health) * 0.5; 
+    float chance = (1.0 - u_relative_health) * 0.5; 
+    
+    vec4 redColor = vec4(1.0, 0.0, 0.0, 1.0);
+
+    float randomValue = fract(sin(dot(uv.xy + gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+
+    if (randomValue < chance) {
+        gl_FragColor = vec4(mix(textureColor.rgb, redColor.rgb, redIntensity), textureColor.a) * color;
+    } else {
+        gl_FragColor = vec4(textureColor.rgb, textureColor.a) * color;
+    }
+}
+";
+}
+
