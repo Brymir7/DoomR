@@ -37,6 +37,7 @@ enum Textures {
     SkeletonFrontSpriteSheet,
     SkeletonBackSpriteSheet,
     SkeletonSideSpriteSheet,
+    BloodAnimationSpriteSheet,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -44,6 +45,9 @@ pub struct EnemyHandle(pub u16);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct WallHandle(pub u16);
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DoorHandle(pub u16);
 
 static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new(|| {
     let mut map = HashMap::new();
@@ -79,6 +83,10 @@ static TEXTURE_TYPE_TO_TEXTURE2D: Lazy<HashMap<Textures, Texture2D>> = Lazy::new
             ImageFormat::Png
         )
     );
+    map.insert(
+        Textures::BloodAnimationSpriteSheet,
+        load_and_convert_texture(include_bytes!("../textures//blood.png"), ImageFormat::Png)
+    );
     map
 });
 
@@ -97,9 +105,10 @@ fn window_conf() -> Conf {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum EntityType {
     Player,
-    Wall(u16),
+    Wall(WallHandle),
     None,
     Enemy(EnemyHandle),
+    Door(DoorHandle),
 }
 enum WorldEventType {
     PlayerHitEnemy,
@@ -124,27 +133,7 @@ impl Tile {
         }
     }
 }
-struct WorldEventTileBased {
-    event_type: WorldEventType,
-    triggered_by_tile_handle: Tile,
-    target_tile_handle: Tile,
-}
-impl WorldEventTileBased {
-    fn player_hit_enemy(player_handle: Tile, enemy_handle: Tile) -> Self {
-        return WorldEventTileBased {
-            event_type: WorldEventType::PlayerHitEnemy,
-            triggered_by_tile_handle: player_handle,
-            target_tile_handle: enemy_handle,
-        };
-    }
-    fn enemy_hit_player(player_handle: Tile, enemy_handle: Tile) -> Self {
-        return WorldEventTileBased {
-            event_type: WorldEventType::PlayerHitEnemy,
-            triggered_by_tile_handle: enemy_handle,
-            target_tile_handle: player_handle,
-        };
-    }
-}
+
 struct WorldEventHandleBased { // to avoid multiple tile lookups and inaccuracies due to rounding when intersecting for example
     event_type: WorldEventType,
 
@@ -154,6 +143,12 @@ impl WorldEventHandleBased {
     fn EnemyHitPlayer(enemy_handle: EnemyHandle) -> Self {
         WorldEventHandleBased {
             event_type: WorldEventType::EnemyHitPlayer,
+            other_involved: enemy_handle.0,
+        }
+    }
+    fn PlayerHitEnemy(enemy_handle: EnemyHandle) -> Self {
+        WorldEventHandleBased {
+            event_type: WorldEventType::PlayerHitEnemy,
             other_involved: enemy_handle.0,
         }
     }
@@ -278,7 +273,6 @@ struct UpdateEnemyAnimation;
 impl UpdateEnemyAnimation {
     fn update(
         player_origin: Vec2,
-        player_angle: f32,
         enemy_positions: &Vec<Vec2>,
         aggressive_states: &Vec<bool>,
         velocities: &Vec<Vec2>,
@@ -417,6 +411,33 @@ impl CollisionData {
         }
     }
 }
+enum DoorDirection {
+    LEFT,
+    RIGHT,
+    UP,
+    DOWN,
+}
+struct Doors {
+    positions: Vec<Vec2>,
+    opened: Vec<bool>,
+    directions: Vec<DoorDirection>,
+}
+
+impl Doors {
+    fn new() -> Self {
+        Doors {
+            positions: Vec::new(),
+            opened: Vec::new(),
+            directions: Vec::new(),
+        }
+    }
+    fn add_door(&mut self, position: Vec2, direction: DoorDirection) -> DoorHandle {
+        self.positions.push(position);
+        self.opened.push(false);
+        self.directions.push(direction);
+        return DoorHandle((self.positions.len() - 1) as u16);
+    }
+}
 struct EnemyInformation {
     idx: u16,
     pos: Vec2,
@@ -459,7 +480,7 @@ impl Enemies {
         health: u8,
         size: Vec2,
         animation: AnimationState
-    ) -> usize {
+    ) -> EnemyHandle {
         let index = self.positions.len();
         self.positions.push(pos);
         self.velocities.push(velocity);
@@ -471,7 +492,7 @@ impl Enemies {
         self.collision_data.collision_times.push(Duration::from_secs(0));
         self.aggressive_states.push(false);
         self.interactables.push(true);
-        index
+        EnemyHandle(index as u16)
     }
     fn destroy_enemy(&mut self, idx: u16) {
         self.positions.swap_remove(idx as usize);
@@ -549,7 +570,7 @@ impl WeaponSystem {
     }
 }
 struct ShootEvent {
-    world_event: Option<WorldEventTileBased>,
+    world_event: Option<WorldEventHandleBased>,
     still_reloading: bool,
 }
 struct Player {
@@ -585,12 +606,7 @@ impl Player {
                     let event = if (enemy_dist.round() as u32) > (self.weapon.range as u32) {
                         None
                     } else {
-                        Some(
-                            WorldEventTileBased::player_hit_enemy(
-                                Tile::from_vec2(self.pos),
-                                Tile::from_vec2(*enemy_pos)
-                            )
-                        )
+                        Some(WorldEventHandleBased::PlayerHitEnemy(enemy))
                     };
                     return ShootEvent {
                         world_event: event,
@@ -614,7 +630,7 @@ impl MovingEntityCollisionSystem {
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemy_positions: &Vec<Vec2>,
         enemy_sizes: &Vec<Vec2>,
-        enemy_interactables: &Vec<bool>,
+        enemy_interactables: &Vec<bool>
     ) -> Option<WorldEventHandleBased> {
         let player_size = Vec2::new(1.0, 1.0);
         let check_radius = 2; // based on maximum enemy size
@@ -629,10 +645,12 @@ impl MovingEntityCollisionSystem {
                 if let EntityType::Enemy(enemy_handle) = world_layout[y][x] {
                     let enemy_index = enemy_handle.0 as usize;
                     let enemy_interactable = enemy_interactables[enemy_index];
-                    if !enemy_interactable {continue;}
+                    if !enemy_interactable {
+                        continue;
+                    }
                     let enemy_pos = &enemy_positions[enemy_index];
                     let enemy_size = &enemy_sizes[enemy_index];
-                    
+
                     if Self::check_collision(player_pos, &player_size, enemy_pos, enemy_size) {
                         return Some(WorldEventHandleBased::EnemyHitPlayer(enemy_handle));
                     }
@@ -647,7 +665,7 @@ impl MovingEntityCollisionSystem {
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemy_positions: &Vec<Vec2>,
         enemy_sizes: &Vec<Vec2>,
-        enemy_interactables: &Vec<bool>,
+        enemy_interactables: &Vec<bool>
     ) -> Vec<(EnemyHandle, EnemyHandle)> {
         let mut collisions = Vec::new();
         let check_radius = 2; // Based on enemy size later
@@ -657,7 +675,9 @@ impl MovingEntityCollisionSystem {
                 if let EntityType::Enemy(enemy_handle1) = world_layout[y][x] {
                     let enemy_index1 = enemy_handle1.0 as usize;
                     let enemy_interactable1 = &enemy_interactables[enemy_index1];
-                    if !enemy_interactable1 {continue;}
+                    if !enemy_interactable1 {
+                        continue;
+                    }
                     let enemy_pos1 = &enemy_positions[enemy_index1];
                     let enemy_size1 = &enemy_sizes[enemy_index1];
 
@@ -679,7 +699,9 @@ impl MovingEntityCollisionSystem {
                                 if enemy_handle1 != enemy_handle2 {
                                     let enemy_index2 = enemy_handle2.0 as usize;
                                     let enemy_interactable2 = enemy_interactables[enemy_index2];
-                                    if !enemy_interactable2 {continue;}
+                                    if !enemy_interactable2 {
+                                        continue;
+                                    }
                                     let enemy_pos2 = &enemy_positions[enemy_index2];
                                     let enemy_size2 = &enemy_sizes[enemy_index2];
 
@@ -932,13 +954,46 @@ impl RaycastSystem {
                 curr_map_tile_y = ((curr_map_tile_y as isize) + step_y) as usize;
             }
             match tile_map[curr_map_tile_y][curr_map_tile_x] {
-                EntityType::Wall(_) => {
+                EntityType::Wall(handle) => {
                     let distance = if is_x_side {
                         dist_side_x - relative_tile_dist_x
                     } else {
                         dist_side_y - relative_tile_dist_y
                     };
                     return Some(RaycastStepResult {
+                        entity_type: EntityType::Wall(handle),
+                        intersection_pos: Vec2::new(
+                            origin.x + direction.x * distance,
+                            origin.y + direction.y * distance
+                        ),
+                        intersection_site: if is_x_side {
+                            if direction.x > 0.0 {
+                                IntersectedSite::XLeft
+                            } else {
+                                IntersectedSite::XRight
+                            }
+                        } else {
+                            if direction.y > 0.0 {
+                                IntersectedSite::YTop
+                            } else {
+                                IntersectedSite::YBottom
+                            }
+                        },
+                        corrected_distance: if is_x_side {
+                            dist_side_x - relative_tile_dist_x
+                        } else {
+                            dist_side_y - relative_tile_dist_y
+                        },
+                    });
+                }
+                EntityType::Door(handle) => {
+                    let distance = if is_x_side {
+                        dist_side_x - relative_tile_dist_x
+                    } else {
+                        dist_side_y - relative_tile_dist_y
+                    };
+                    return Some(RaycastStepResult {
+                        entity_type: EntityType::Door(handle),
                         intersection_pos: Vec2::new(
                             origin.x + direction.x * distance,
                             origin.y + direction.y * distance
@@ -1010,6 +1065,9 @@ impl RaycastSystem {
                 EntityType::Wall(_) => {
                     return None;
                 }
+                EntityType::Door(_) => {
+                    return None;
+                }
                 EntityType::Enemy(handle) => {
                     return Some(handle);
                 }
@@ -1035,6 +1093,16 @@ impl RenderMap {
                             (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
                             (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
                             BROWN
+                        );
+                    }
+                    EntityType::Door(_) => {
+                        draw_rectangle(
+                            (x as f32) * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                                MAP_X_OFFSET,
+                            (y as f32) * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                            (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
+                            (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                            ORANGE
                         );
                     }
                     _ => {}
@@ -1146,48 +1214,88 @@ impl RenderPlayerPOV {
         for (i, result) in raycast_step_res.iter().enumerate() {
             let distance = result.corrected_distance;
             z_buffer[i] = distance;
-            let wall_color = GREEN;
+
             let wall_height = ((SCREEN_HEIGHT as f32) / (distance - 0.5 + 0.000001)).min(
                 SCREEN_HEIGHT as f32
             );
             let shade = 1.0 - (distance / (WORLD_WIDTH.min(WORLD_HEIGHT) as f32)).clamp(0.0, 1.0);
-            let wall_color = Color::new(
-                wall_color.r * shade,
-                wall_color.g * shade,
-                wall_color.b * shade,
-                1.0
-            );
+
             let is_x_side =
                 result.intersection_site == IntersectedSite::XLeft ||
                 result.intersection_site == IntersectedSite::XRight;
-            let wall_color = if is_x_side {
-                wall_color
-            } else {
-                Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
-            };
+
             let text_coord_x = if is_x_side {
                 (result.intersection_pos.y * text_width) % text_width
             } else {
                 (result.intersection_pos.x * text_width) % text_width
             };
-            draw_texture_ex(
-                block_texture,
-                (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
-                config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
-                wall_color,
-                DrawTextureParams {
-                    source: {
-                        Some(Rect {
-                            x: text_coord_x,
-                            y: 0.0,
-                            w: 1.0,
-                            h: text_height,
-                        })
-                    },
-                    dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
-                    ..Default::default()
+            match result.entity_type {
+                EntityType::Wall(_) => {
+                    let wall_color = GREEN;
+                    let wall_color = Color::new(
+                        wall_color.r * shade,
+                        wall_color.g * shade,
+                        wall_color.b * shade,
+                        1.0
+                    );
+                    let wall_color = if is_x_side {
+                        wall_color
+                    } else {
+                        Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
+                    };
+                    draw_texture_ex(
+                        block_texture,
+                        (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
+                        config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
+                        wall_color,
+                        DrawTextureParams {
+                            source: {
+                                Some(Rect {
+                                    x: text_coord_x,
+                                    y: 0.0,
+                                    w: 1.0,
+                                    h: text_height,
+                                })
+                            },
+                            dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
+                            ..Default::default()
+                        }
+                    );
                 }
-            );
+                EntityType::Door(_) => {
+                    let wall_color = BROWN;
+                    let wall_color = Color::new(
+                        wall_color.r * shade,
+                        wall_color.g * shade,
+                        wall_color.b * shade,
+                        1.0
+                    );
+                    let wall_color = if is_x_side {
+                        wall_color
+                    } else {
+                        Color::new(wall_color.r * 0.8, wall_color.g * 0.8, wall_color.b * 0.8, 1.0)
+                    };
+                    draw_texture_ex(
+                        block_texture,
+                        (i as f32) * RAY_VERTICAL_STRIPE_WIDTH,
+                        config::config::HALF_SCREEN_HEIGHT - wall_height / 2.0,
+                        wall_color,
+                        DrawTextureParams {
+                            source: {
+                                Some(Rect {
+                                    x: text_coord_x,
+                                    y: 0.0,
+                                    w: 1.0,
+                                    h: text_height,
+                                })
+                            },
+                            dest_size: Some(Vec2::new(RAY_VERTICAL_STRIPE_WIDTH, wall_height)),
+                            ..Default::default()
+                        }
+                    );
+                }
+                _ => {}
+            }
         }
     }
     #[inline(always)]
@@ -1293,6 +1401,7 @@ struct RaycastStepResult {
     intersection_site: IntersectedSite,
     intersection_pos: Vec2,
     corrected_distance: f32,
+    entity_type: EntityType,
 }
 struct SeenEnemy {
     enemy_handle: EnemyHandle,
@@ -1305,16 +1414,17 @@ impl EnemyAggressionSystem {
         enemy_positions: &Vec<Vec2>,
         enemy_velocities: &mut Vec<Vec2>,
         aggressive_states: &mut Vec<bool>,
-        enemy_interactables: & Vec<bool>,
+        enemy_interactables: &Vec<bool>
     ) {
         let tile_pos_player = player_pos.trunc();
         for (((enemy_pos, enemy_vel), is_aggressive), interactable) in enemy_positions
             .iter()
             .zip(enemy_velocities.iter_mut())
             .zip(aggressive_states.iter_mut())
-            .zip(enemy_interactables.iter())
-             {
-            if !interactable {continue;}
+            .zip(enemy_interactables.iter()) {
+            if !interactable {
+                continue;
+            }
             let dist_vector = tile_pos_player - enemy_pos.trunc();
             if dist_vector.length() <= ENEMY_VIEW_DISTANCE {
                 *is_aggressive = true;
@@ -1387,6 +1497,7 @@ struct World {
     shoot_sound: Sound,
     reload_sound: Sound,
     walls: Vec<Vec2>,
+    doors: Doors,
     enemies: Enemies,
     player: Player,
     postprocessing: VisualEffect,
@@ -1395,6 +1506,7 @@ impl World {
     async fn default() -> Self {
         let mut walls = Vec::new();
         let mut enemies = Enemies::new();
+        let mut doors = Doors::new();
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
             angle: 0.0,
@@ -1411,7 +1523,7 @@ impl World {
                         world_layout[y][x] = EntityType::None;
                     }
                     1 => {
-                        world_layout[y][x] = EntityType::Wall(walls.len() as u16);
+                        world_layout[y][x] = EntityType::Wall(WallHandle(walls.len() as u16));
                         walls.push(Vec2::new(x as f32, y as f32));
                     }
                     2 => {
@@ -1429,7 +1541,40 @@ impl World {
                             Vec2::new(1.0, 1.0),
                             AnimationState::default_skeleton()
                         );
-                        world_layout[y][x] = EntityType::Enemy(EnemyHandle(handle as u16));
+                        world_layout[y][x] = EntityType::Enemy(handle);
+                    }
+                    4 | 5 => {
+                        let direction; // Default direction
+                        if
+                            y > 0 &&
+                            y < WORLD_HEIGHT - 1 &&
+                            layout[y - 1][x] != 0 &&
+                            layout[y + 1][x] != 0
+                        {
+                            // Block above and below, door should be LEFT or RIGHT
+                            if layout[y][x] == 4 {
+                                direction = DoorDirection::RIGHT;
+                            } else {
+                                direction = DoorDirection::LEFT;
+                            }
+                        } else if
+                            x > 0 &&
+                            x < WORLD_WIDTH - 1 &&
+                            layout[y][x - 1] != 0 &&
+                            layout[y][x + 1] != 0
+                        {
+                            // Block left and right, door should be UP or DOWN
+                            if layout[y][x] == 4 {
+                                direction = DoorDirection::DOWN;
+                            } else {
+                                direction = DoorDirection::UP;
+                            }
+                        } else {
+                            panic!("Invalid door layout at ({}, {})", x, y);
+                        }
+
+                        let handle = doors.add_door(Vec2::new(x as f32, y as f32), direction);
+                        world_layout[y][x] = EntityType::Door(handle);
                     }
                     _ => panic!("Invalid entity type in world layout"),
                 };
@@ -1524,6 +1669,7 @@ impl World {
             background_material: background_material,
             camera_shake_material: camera_shake_material,
             walls,
+            doors,
             enemies,
             player,
             shoot_sound,
@@ -1532,58 +1678,6 @@ impl World {
         }
     }
 
-    fn handle_world_event_tile_based(&mut self, event: WorldEventTileBased) {
-        match event.event_type {
-            WorldEventType::PlayerHitEnemy => {
-                let enemy_handle: EntityType =
-                    self.world_layout[event.target_tile_handle.y as usize]
-                        [event.target_tile_handle.x as usize];
-                match enemy_handle {
-                    EntityType::Enemy(idx) => {
-                        let health = self.enemies.healths
-                            .get_mut(idx.0 as usize)
-                            .expect("Invalid handle in world layout");
-                        if *health == 0 {
-                            // avoid rescheduling animation callback
-                            return;
-                        }
-
-                        if *health <= self.player.weapon.damage {
-                            PlayEnemyAnimation::play_death(
-                                idx,
-                                &mut self.enemies.velocities,
-                                &mut self.enemies.animation_states,
-                                &mut self.enemies.interactables
-                            );
-                            return;
-                        }
-
-                        *health -= self.player.weapon.damage;
-                    }
-                    _ => panic!("Hit invalid enemy"),
-                }
-            }
-            WorldEventType::EnemyHitPlayer => {
-                let enemy_handle: EntityType =
-                    self.world_layout[event.triggered_by_tile_handle.y as usize]
-                        [event.triggered_by_tile_handle.x as usize];
-                match enemy_handle {
-                    EntityType::Enemy(idx) => {
-                        self.player.pos =
-                            self.player.pos + self.enemies.velocities[idx.0 as usize] * 5.0; // move player away
-                        if self.player.health == 1 {
-                            exit(1);
-                        }
-                        self.player.health -= 1;
-                        self.postprocessing = VisualEffect::CameraShake(
-                            CameraShake::new(0.5, 10.0)
-                        );
-                    }
-                    _ => panic!("Hit invalid enemy"),
-                }
-            }
-        }
-    }
     fn move_player(&mut self, delta: Vec2) {
         let old_pos = self.player.pos;
 
@@ -1611,7 +1705,26 @@ impl World {
                 self.player.health -= 1;
                 self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.5, 10.0));
             }
-            WorldEventType::PlayerHitEnemy => todo!(),
+            WorldEventType::PlayerHitEnemy => {
+                let health = self.enemies.healths
+                    .get_mut(event.other_involved as usize)
+                    .expect("Invalid handle in world layout");
+                if *health == 0 {
+                    // avoid rescheduling animation callback
+                    return;
+                }
+                if *health <= self.player.weapon.damage {
+                    PlayEnemyAnimation::play_death(
+                        EnemyHandle(event.other_involved),
+                        &mut self.enemies.velocities,
+                        &mut self.enemies.animation_states,
+                        &mut self.enemies.interactables
+                    );
+                    return;
+                }
+
+                *health -= self.player.weapon.damage;
+            }
         }
     }
 
@@ -1637,9 +1750,10 @@ impl World {
                 play_sound_once(&self.reload_sound);
             } else {
                 play_sound_once(&self.shoot_sound);
+                self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.2, 10.0));
             }
             if let Some(event) = shoot_event.world_event {
-                self.handle_world_event_tile_based(event);
+                self.handle_world_event_handle_based(event);
             }
         }
     }
@@ -1649,8 +1763,9 @@ impl World {
         assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
         assert!(self.walls.len() < 65536);
         WeaponSystem::update_reload(&mut self.player.weapon);
-        MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout);
+        MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout); // TODO currently chekcing for all walls, which is not necessary, use tilemap
         MovementSystem::update_enemies(
+            // TODO currently chekcing for all walls, which is not necessary, use tilemap
             &mut self.enemies,
             &self.walls,
             &mut self.world_layout,
@@ -1661,7 +1776,7 @@ impl World {
             &self.world_layout,
             &self.enemies.positions,
             &self.enemies.sizes,
-            &self.enemies.interactables,
+            &self.enemies.interactables
         );
         if let Some(event) = event {
             self.handle_world_event_handle_based(event);
@@ -1671,12 +1786,11 @@ impl World {
             &self.enemies.positions,
             &mut self.enemies.velocities,
             &mut self.enemies.aggressive_states,
-            &self.enemies.interactables,
+            &self.enemies.interactables
         );
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let animation_callback_events = UpdateEnemyAnimation::update(
             self.player.pos,
-            self.player.angle,
             &self.enemies.positions,
             &self.enemies.aggressive_states,
             &self.enemies.velocities,
@@ -1705,22 +1819,6 @@ impl World {
             self.player.angle,
             player_ray_origin
         );
-        match &mut self.postprocessing {
-            VisualEffect::CameraShake(shake) => {
-                gl_use_material(&self.camera_shake_material);
-                let shake_offset = shake.update(get_frame_time());
-                self.camera_shake_material.set_uniform(
-                    "screen_size",
-                    Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
-                );
-                self.camera_shake_material.set_uniform("shake_offset", shake_offset);
-                if shake_offset == Vec2::ZERO {
-                    self.postprocessing = VisualEffect::None;
-                }
-            }
-            VisualEffect::None => {}
-            _ => todo!(),
-        }
         let mut z_buffer = [f32::MAX; AMOUNT_OF_RAYS as usize];
         RenderPlayerPOV::render_walls(&raycast_result, &mut z_buffer);
         let mut seen_enemies = Vec::new();
@@ -1765,6 +1863,22 @@ impl World {
             &self.enemies.positions,
             &self.enemies.animation_states
         );
+        match &mut self.postprocessing {
+            VisualEffect::CameraShake(shake) => {
+                gl_use_material(&self.camera_shake_material);
+                let shake_offset = shake.update(get_frame_time());
+                self.camera_shake_material.set_uniform(
+                    "screen_size",
+                    Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)
+                );
+                self.camera_shake_material.set_uniform("shake_offset", shake_offset);
+                if shake_offset == Vec2::ZERO {
+                    self.postprocessing = VisualEffect::None;
+                }
+            }
+            VisualEffect::None => {}
+            _ => todo!(),
+        }
         RenderPlayerPOV::render_weapon();
         gl_use_default_material();
         RenderMap::render_world_layout(&self.world_layout);
