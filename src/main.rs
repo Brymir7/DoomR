@@ -7,6 +7,7 @@ use config::config::{
     ENEMY_VIEW_DISTANCE,
     HALF_PLAYER_FOV,
     HALF_SCREEN_HEIGHT,
+    HALF_SCREEN_WIDTH,
     MAP_X_OFFSET,
     PHYSICS_FRAME_TIME,
     PLAYER_FOV,
@@ -20,7 +21,11 @@ use config::config::{
 };
 use image_utils::load_and_convert_texture;
 use once_cell::sync::Lazy;
-use macroquad::{ audio::{ load_sound, play_sound_once, Sound }, material, prelude::* };
+use macroquad::{
+    audio::{ load_sound, play_sound, play_sound_once, PlaySoundParams, Sound },
+    material,
+    prelude::*,
+};
 use shaders::shaders::{
     CAMERA_SHAKE_VERTEX_SHADER,
     DEFAULT_FRAGMENT_SHADER,
@@ -687,12 +692,9 @@ impl Doors {
         DoorHandle((self.positions.len() - 1) as u16)
     }
 
-    fn render_door(&self, door_index: u16) {
-        let door_index = door_index as usize;
-        if let Some((top_left, bottom_right)) = self.get_door_hitbox(door_index) {
-            let width = bottom_right.x - top_left.x;
-            let height = bottom_right.y - top_left.y;
-
+    fn render_door(&self, door_h: DoorHandle) {
+        if let Some(rect_hitbox) = self.get_door_hitbox(door_h) {
+            let door_index = door_h.0 as usize;
             let progress = self.animation_progress[door_index];
             let direction = &self.directions[door_index];
 
@@ -700,21 +702,13 @@ impl Doors {
                 DoorDirection::LEFT | DoorDirection::RIGHT => (progress * PI) / 2.0,
                 DoorDirection::UP | DoorDirection::DOWN => (-progress * PI) / 2.0,
             };
-
-            let door_color = if self.opened[door_index] {
-                Color::new(0.8, 0.4, 0.0, 1.0)
-            } else {
-                Color::new(0.6, 0.3, 0.0, 1.0)
-            };
-
             draw_rectangle_ex(
-                (top_left.x + width / 2.0) * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-                    MAP_X_OFFSET,
-                (top_left.y + height / 2.0) * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                width * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
-                height * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
+                rect_hitbox.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
+                rect_hitbox.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                rect_hitbox.w * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
+                rect_hitbox.h * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
                 DrawRectangleParams {
-                    color: door_color,
+                    color: WHITE,
                     rotation: angle,
                     ..Default::default()
                 }
@@ -729,45 +723,66 @@ impl Doors {
             }
         }
     }
-    fn get_door_hitbox(&self, door_index: usize) -> Option<(Vec2, Vec2)> {
+    fn get_door_hitbox(&self, door_h: DoorHandle) -> Option<Rect> {
+        let door_index = door_h.0 as usize;
         if door_index >= self.positions.len() {
             return None;
         }
+        let door_opened = self.opened[door_index];
 
         let position = &self.positions[door_index];
         let progress = self.animation_progress[door_index];
+
         let direction = &self.directions[door_index];
-
-        let angle = (progress * PI) / 2.0;
-        let (sin, cos) = angle.sin_cos();
-
-        let (rotated_width, rotated_height) = match direction {
-            DoorDirection::LEFT | DoorDirection::RIGHT =>
-                (self.door_width * cos, self.door_width * sin + self.door_height * cos),
-            DoorDirection::UP | DoorDirection::DOWN =>
-                (self.door_height * sin + self.door_width * cos, self.door_height * cos),
+        let angle = match direction {
+            DoorDirection::LEFT | DoorDirection::RIGHT => (progress * PI) / 2.0,
+            DoorDirection::UP | DoorDirection::DOWN => -(progress * PI) / 2.0,
         };
 
-        let (offset_x, offset_y) = match direction {
-            DoorDirection::LEFT => (-rotated_width, 0.0),
-            DoorDirection::RIGHT => (0.0, 0.0),
-            DoorDirection::UP => (0.0, -rotated_height),
-            DoorDirection::DOWN => (0.0, 0.0),
-        };
+        let door_width = self.door_width;
+        let door_height = self.door_height;
 
-        let top_left = Vec2 {
-            x: position.x + offset_x,
-            y: position.y + offset_y,
-        };
-
-        let bottom_right = Vec2 {
-            x: top_left.x + rotated_width,
-            y: top_left.y + rotated_height,
-        };
-
-        Some((top_left, bottom_right))
+        let (sin_angle, cos_angle) = angle.sin_cos();
+        let rotated_width = door_width * cos_angle + door_height * sin_angle;
+        let rotated_height = door_width * sin_angle + door_height * cos_angle;
+        if progress >= 0.44 {
+            // this means its fully opened / disappeared
+            return Some(Rect::new(position.x, position.y, door_width * 0.1, door_height));
+        }
+        Some(Rect::new(position.x, position.y, rotated_width, rotated_height))
     }
 
+    fn get_ray_intersection_point(
+        rect: &Rect,
+        ray_origin: Vec2,
+        ray_direction: Vec2
+    ) -> Option<Vec2> {
+        let mut tmin = (rect.x - ray_origin.x) / ray_direction.x; // closest intersection | x
+        let mut tmax = (rect.x + rect.w - ray_origin.x) / ray_direction.x; // farthest | x
+
+        if tmin > tmax {
+            std::mem::swap(&mut tmin, &mut tmax);
+        }
+
+        let mut tymin = (rect.y - ray_origin.y) / ray_direction.y;
+        let mut tymax = (rect.y + rect.h - ray_origin.y) / ray_direction.y;
+
+        if tymin > tymax {
+            std::mem::swap(&mut tymin, &mut tymax);
+        }
+
+        if tmin > tymax || tymin > tmax {
+            return None;
+        }
+
+        let t = tmin.max(tymin);
+
+        if t < 0.0 {
+            return None;
+        }
+
+        Some(Vec2::new(ray_origin.x + t * ray_direction.x, ray_origin.y + t * ray_direction.y))
+    }
     fn open_door(&mut self, handle: DoorHandle) {
         let index = handle.0 as usize;
         if index < self.opened.len() {
@@ -1056,6 +1071,7 @@ impl MovementSystem {
     fn update_enemies(
         enemies: &mut Enemies,
         walls: &Vec<Vec2>,
+        doors: &Doors,
         world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         current_time: Duration
     ) {
@@ -1071,7 +1087,7 @@ impl MovementSystem {
             let mut new_pos = *pos + *vel * PHYSICS_FRAME_TIME;
 
             let (collided_x, collided_y) = Self::resolve_wall_collisions(&mut new_pos, walls, *pos);
-
+            Self::player_resolve_door_collision(pos, doors);
             if collided_x {
                 enemies.collision_data.x_collisions[id] += 1;
             }
@@ -1174,16 +1190,36 @@ impl MovementSystem {
     fn update_player(
         player: &mut Player,
         walls: &Vec<Vec2>,
+        doors: &Doors,
         world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) {
         let prev_tile = Tile::from_vec2(player.pos);
         player.pos += player.vel * PHYSICS_FRAME_TIME;
-        Self::player_resolve_wall_collisions(&mut player.pos, walls);
+        Self::player_resolve_wall_collisions(&mut player.pos, walls); // we could only iterate over a subset using Surrounding
+        Self::player_resolve_door_collision(&mut player.pos, doors); // we could only iterate over a subset using Surrounding.
         let new_tile = Tile::from_vec2(player.pos);
-        world_layout[new_tile.y as usize][new_tile.x as usize] = EntityType::Player;
-        if prev_tile != new_tile {
-            assert!(world_layout[prev_tile.y as usize][prev_tile.x as usize] == EntityType::Player);
-            world_layout[prev_tile.y as usize][prev_tile.x as usize] = EntityType::None;
+        match world_layout[new_tile.y as usize][new_tile.x as usize] {
+            EntityType::Door(_) => {
+                // the only tile where we can be at the same position which is valid, but we dont want to overwrite it
+                // player has smaller hitbox when standing inside a wall due to not updating the tile, but this keeps it simple for now
+                // as its the only interaction where this can happen
+            }
+            _ => {
+                world_layout[new_tile.y as usize][new_tile.x as usize] = EntityType::Player;
+                if prev_tile != new_tile {
+                    match world_layout[prev_tile.y as usize][prev_tile.x as usize] {
+                        EntityType::Door(_) => {} // same as above
+                        _ => {
+                            assert!(
+                                world_layout[prev_tile.y as usize][prev_tile.x as usize] ==
+                                    EntityType::Player
+                            );
+                            world_layout[prev_tile.y as usize][prev_tile.x as usize] =
+                                EntityType::None;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1206,12 +1242,37 @@ impl MovementSystem {
             }
         }
     }
+    fn player_resolve_door_collision(position: &mut Vec2, doors: &Doors) {
+        for i in 0..doors.positions.len() {
+            let door_pos = doors.positions[i];
+            let door_opened = doors.opened[i];
+            if door_opened {
+                return;
+            }
+            let point_1 = Vec2::new(door_pos.x + 0.5, door_pos.y + 0.5);
+            let point_2 = Vec2::new(position.x + 0.5, position.y + 0.5);
+
+            let distance_x = (point_2.x - point_1.x).abs();
+            let distance_y = (point_2.y - point_1.y).abs();
+
+            if distance_x < 1.0 && distance_y < 1.0 {
+                if distance_x > distance_y {
+                    let normal = Vec2::new(point_2.x - point_1.x, 0.0).normalize();
+                    *position += normal * (1.0 - distance_x);
+                } else {
+                    let normal = Vec2::new(0.0, point_2.y - point_1.y).normalize();
+                    *position += normal * (1.0 - distance_y);
+                }
+            }
+        }
+    }
 }
 struct RaycastSystem;
 impl RaycastSystem {
     fn raycast(
         origin: Vec2,
         player_angle: f32,
+        doors: &Doors,
         tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) -> Vec<RaycastStepResult> {
         let mut res = Vec::new();
@@ -1221,7 +1282,7 @@ impl RaycastSystem {
                 config::config::PLAYER_FOV / 2.0 -
                 ((i as f32) / (AMOUNT_OF_RAYS as f32)) * config::config::PLAYER_FOV;
 
-            let step_result = RaycastSystem::daa_raycast(origin, ray_angle, tile_map);
+            let step_result = RaycastSystem::daa_raycast(origin, ray_angle, doors, tile_map);
             if let Some(step) = step_result {
                 res.push(step);
             }
@@ -1232,6 +1293,7 @@ impl RaycastSystem {
     fn daa_raycast(
         origin: Vec2,
         specific_angle: f32,
+        doors: &Doors,
         tile_map: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) -> Option<RaycastStepResult> {
         let direction = Vec2::new(specific_angle.cos(), specific_angle.sin());
@@ -1304,31 +1366,42 @@ impl RaycastSystem {
                     } else {
                         dist_side_y - relative_tile_dist_y
                     };
-                    return Some(RaycastStepResult {
-                        entity_type: EntityType::Door(handle),
-                        intersection_pos: Vec2::new(
-                            origin.x + direction.x * distance,
-                            origin.y + direction.y * distance
-                        ),
-                        intersection_site: if is_x_side {
-                            if direction.x > 0.0 {
-                                IntersectedSite::XLeft
+                    let corrected_distance = if is_x_side {
+                        dist_side_x - relative_tile_dist_x
+                    } else {
+                        dist_side_y - relative_tile_dist_y
+                    };
+                    let tile_intersection = Vec2::new(
+                        origin.x + direction.x * distance,
+                        origin.y + direction.y * distance
+                    );
+                    if
+                        let Some(point) = Doors::get_ray_intersection_point(
+                            &doors.get_door_hitbox(handle).expect("Invalid hndle to door"),
+                            tile_intersection,
+                            direction
+                        )
+                    {
+                        return Some(RaycastStepResult {
+                            entity_type: EntityType::Door(handle),
+                            intersection_pos: point,
+                            intersection_site: if is_x_side {
+                                if direction.x > 0.0 {
+                                    IntersectedSite::XLeft
+                                } else {
+                                    IntersectedSite::XRight
+                                }
                             } else {
-                                IntersectedSite::XRight
-                            }
-                        } else {
-                            if direction.y > 0.0 {
-                                IntersectedSite::YTop
-                            } else {
-                                IntersectedSite::YBottom
-                            }
-                        },
-                        corrected_distance: if is_x_side {
-                            dist_side_x - relative_tile_dist_x
-                        } else {
-                            dist_side_y - relative_tile_dist_y
-                        },
-                    });
+                                if direction.y > 0.0 {
+                                    IntersectedSite::YTop
+                                } else {
+                                    IntersectedSite::YBottom
+                                }
+                            },
+                            corrected_distance: corrected_distance +
+                            point.distance(tile_intersection),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -1397,6 +1470,7 @@ impl RenderMap {
         doors: &Doors
     ) {
         draw_rectangle(MAP_X_OFFSET, 0.0, (SCREEN_WIDTH as f32) - MAP_X_OFFSET, 270.0, GRAY);
+        let mut draw_doors = Vec::new();
         for y in 0..WORLD_HEIGHT {
             for x in 0..WORLD_WIDTH {
                 match world_layout[y][x] {
@@ -1411,11 +1485,14 @@ impl RenderMap {
                         );
                     }
                     EntityType::Door(handle) => {
-                        doors.render_door(handle.0);
+                        draw_doors.push(handle);
                     }
                     _ => {}
                 }
             }
+        }
+        for door in draw_doors {
+            doors.render_door(door);
         }
     }
     #[inline(always)]
@@ -1471,7 +1548,7 @@ impl RenderPlayerPOV {
         // can sort for priority here based on whnat kind of event it is, player position
         for interactable in interactables {
             match interactable.interaction_type {
-                InteractionType::OpenDoor(door_handle) => {
+                InteractionType::OpenDoor(_) => {
                     draw_text(
                         "Press E to Open door",
                         (SCREEN_WIDTH as f32) / 2.0,
@@ -1480,7 +1557,7 @@ impl RenderPlayerPOV {
                         WHITE
                     );
                 }
-                InteractionType::CloseDoor(door_handle) => {
+                InteractionType::CloseDoor(_) => {
                     draw_text(
                         "Press E to Close door",
                         (SCREEN_WIDTH as f32) / 2.0,
@@ -1534,7 +1611,7 @@ impl RenderPlayerPOV {
         gl_use_default_material();
     }
     #[inline(always)]
-    fn render_walls(
+    fn render_walls_and_doors(
         raycast_step_res: &Vec<RaycastStepResult>,
         z_buffer: &mut [f32; AMOUNT_OF_RAYS]
     ) {
@@ -1740,6 +1817,36 @@ impl RenderPlayerPOV {
             }
         )
     }
+    #[inline(always)]
+    fn render_health(health: u16) {
+        let bar_width = 30.0;
+        let bar_height = 10.0;
+        let spacing = 5.0;
+        let start_x = (SCREEN_WIDTH as f32) * 0.45 - 3.0 * (bar_width + spacing) * 0.5;
+        let y_pos = (SCREEN_HEIGHT as f32) * 0.9;
+        draw_text("Health: ", start_x, (SCREEN_HEIGHT as f32) * 0.88, 26.0, GREEN);
+        for i in 0..3 {
+            let x_pos = start_x + (i as f32) * (bar_width + spacing);
+            let color = if i < health {
+                Color::from_rgba(0, 255, 0, 255) // Active health bar color
+            } else {
+                Color::from_rgba(100, 100, 100, 255) // Inactive health bar color
+            };
+
+            draw_rectangle(x_pos, y_pos, bar_width, bar_height, color);
+
+            if i < health {
+                draw_rectangle_lines(
+                    x_pos - 1.0,
+                    y_pos - 1.0,
+                    bar_width + 2.0,
+                    bar_height + 2.0,
+                    2.0,
+                    Color::from_rgba(0, 255, 0, 150)
+                );
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq)]
 enum IntersectedSite {
@@ -1823,6 +1930,11 @@ impl EnemyAggressionSystem {
             }
             let dist_vector = tile_pos_player - enemy_pos.trunc();
             if dist_vector.length() <= ENEMY_VIEW_DISTANCE {
+                if *is_aggressive {
+                    
+                    *enemy_vel = dist_vector.normalize() * 2.5; 
+                    continue;
+                }
                 *is_aggressive = true;
                 *enemy_vel = dist_vector.normalize();
             } else if *is_aggressive {
@@ -1887,6 +1999,10 @@ enum VisualEffect {
     BloodyScreen,
     None,
 }
+enum GameState {
+    GameGoing,
+    GameOver,
+}
 struct World {
     world_layout: [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
     background_material: Material,
@@ -1900,12 +2016,13 @@ struct World {
     player: Player,
     player_interactables: Vec<InteractionEvent>,
     postprocessing: VisualEffect,
+    game_state: GameState,
 }
 impl World {
     async fn default() -> Self {
         let mut walls = Vec::new();
         let mut enemies = Enemies::new();
-        let mut doors = Doors::new(1.0, 0.5, 2.0);
+        let mut doors = Doors::new(1.0, 1.0, 1.0);
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
             angle: 0.0,
@@ -2112,6 +2229,7 @@ impl World {
             shoot_sound,
             reload_sound,
             postprocessing: VisualEffect::None,
+            game_state: GameState::GameGoing,
         }
     }
 
@@ -2135,12 +2253,16 @@ impl World {
     fn handle_world_event_handle_based(&mut self, event: WorldEventHandleBased) {
         match event.event_type {
             WorldEventType::EnemyHitPlayer => {
+                let enemy_pos = self.enemies.positions[event.other_involved as usize];
+                self.enemies.velocities[event.other_involved as usize] = (
+                    self.player.pos - enemy_pos
+                ).normalize(); // make sure enemy doesnt keep his insane speed,
                 self.move_player(self.enemies.velocities[event.other_involved as usize] * 0.5); // move player away
                 if self.player.health == 1 {
-                    exit(1);
+                    self.game_state = GameState::GameOver;
                 }
                 self.player.health -= 1;
-                self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.5, 10.0));
+                self.postprocessing = VisualEffect::CameraShake(CameraShake::new(0.4, 20.0));
             }
             WorldEventType::PlayerHitEnemy => {
                 let health = self.enemies.healths
@@ -2187,9 +2309,15 @@ impl World {
         if is_key_pressed(KeyCode::Space) {
             let shoot_event = self.player.shoot(self.world_layout, &self.enemies);
             if shoot_event.still_reloading {
-                play_sound_once(&self.reload_sound);
+                play_sound(&self.reload_sound, PlaySoundParams {
+                    volume: 0.4,
+                    looped: false,
+                });
             } else {
-                play_sound_once(&self.shoot_sound);
+                play_sound(&self.shoot_sound, PlaySoundParams {
+                    volume: 0.4,
+                    looped: false,
+                });
                 self.player.animation_state.add_effect(
                     AnimationState::default_explosion(),
                     true,
@@ -2220,11 +2348,17 @@ impl World {
         assert!(self.world_layout.len() < 65536 && self.world_layout[0].len() < 65536);
         assert!(self.walls.len() < 65536);
         WeaponSystem::update_reload(&mut self.player.weapon);
-        MovementSystem::update_player(&mut self.player, &self.walls, &mut self.world_layout); // TODO currently chekcing for all walls, which is not necessary, use tilemap
+        MovementSystem::update_player(
+            &mut self.player,
+            &self.walls,
+            &self.doors,
+            &mut self.world_layout
+        ); // TODO currently chekcing for all walls, which is not necessary, use tilemap
         MovementSystem::update_enemies(
             // TODO currently chekcing for all walls, which is not necessary, use tilemap
             &mut self.enemies,
             &self.walls,
+            &self.doors,
             &mut self.world_layout,
             Duration::from_secs_f32(get_time() as f32)
         );
@@ -2256,6 +2390,7 @@ impl World {
         if let Some(interactable) = opt_interactable {
             self.player_interactables.push(interactable);
         }
+        self.doors.animate_opening(PHYSICS_FRAME_TIME);
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let mut all_animation_callback_events = Vec::new();
 
@@ -2286,6 +2421,7 @@ impl World {
         let raycast_result = RaycastSystem::raycast(
             player_ray_origin,
             self.player.angle,
+            &self.doors,
             &self.world_layout
         );
         let end_time = get_time();
@@ -2297,7 +2433,7 @@ impl World {
             player_ray_origin
         );
         let mut z_buffer = [f32::MAX; AMOUNT_OF_RAYS as usize];
-        RenderPlayerPOV::render_walls(&raycast_result, &mut z_buffer);
+        RenderPlayerPOV::render_walls_and_doors(&raycast_result, &mut z_buffer);
 
         let mut seen_enemies = Vec::new();
         for row in 0..self.world_layout.len() {
@@ -2362,13 +2498,23 @@ impl World {
             _ => todo!(),
         }
         RenderPlayerPOV::render_weapon(&self.player);
+        RenderPlayerPOV::render_health(self.player.health);
         RenderPlayerPOV::render_possible_interactions(&self.player_interactables);
         gl_use_default_material();
         RenderMap::render_world_layout(&self.world_layout, &self.doors);
         RenderMap::render_player_and_enemies_on_map(self.player.pos, &self.enemies);
-        RenderMap::render_rays(player_ray_origin, &raycast_result);
+        // RenderMap::render_rays(player_ray_origin, &raycast_result);
 
         draw_text(&format!("Raycasting FPS: {}", 1.0 / elapsed_time), 10.0, 30.0, 20.0, RED);
+        draw_text("Controls:", 10.0, 50.0, 20.0, RED);
+        draw_text("W/A", 10.0, 70.0, 20.0, YELLOW);
+        draw_text(" to move", 35.0, 70.0, 20.0, WHITE);
+        draw_text("A/D", 10.0, 90.0, 20.0, YELLOW);
+        draw_text(" to rotate", 35.0, 90.0, 20.0, WHITE);
+        draw_text("Spacebar", 10.0, 110.0, 20.0, YELLOW);
+        draw_text(" to shoot", 80.0, 110.0, 20.0, WHITE);
+        draw_text("E", 10.0, 130.0, 20.0, YELLOW);
+        draw_text(" to interact", 20.0, 130.0, 20.0, WHITE);
     }
 }
 #[macroquad::main(window_conf)]
@@ -2377,12 +2523,38 @@ async fn main() {
     let mut world = World::default().await;
     loop {
         elapsed_time += get_frame_time();
-        world.handle_input();
-        if elapsed_time > PHYSICS_FRAME_TIME {
-            world.update();
-            elapsed_time = 0.0;
+        match world.game_state {
+            GameState::GameGoing => {
+                world.handle_input();
+                if elapsed_time > PHYSICS_FRAME_TIME {
+                    world.update();
+                    elapsed_time = 0.0;
+                }
+                world.draw();
+            }
+            GameState::GameOver => {
+                draw_text(
+                    "You lost!",
+                    HALF_SCREEN_WIDTH - 50.0 * 8.0,
+                    HALF_SCREEN_HEIGHT - 50.0,
+                    50.0,
+                    RED
+                );
+                draw_text(
+                    "Press space to play again or ESC to exit",
+                    HALF_SCREEN_WIDTH - 50.0 * 8.0,
+                    HALF_SCREEN_HEIGHT + 50.0,
+                    50.0,
+                    WHITE
+                );
+                if is_key_down(KeyCode::Escape) {
+                    exit(1);
+                }
+                if is_key_down(KeyCode::Space) {
+                    world = World::default().await;
+                }
+            }
         }
-        world.draw();
         draw_text(&format!("FPS: {}", 1.0 / get_frame_time()), 10.0, 10.0, 20.0, WHITE);
         next_frame().await;
     }
