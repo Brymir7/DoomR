@@ -55,5 +55,5 @@ pub mod config {
     pub const MAX_VIEW_DISTANCE: usize = WORLD_WIDTH;
     pub const MAP_X_OFFSET: f32 = (SCREEN_WIDTH as f32) * 0.75;
     pub const MAP_Y_OFFSET: f32 = (SCREEN_HEIGHT as f32) * 0.25;
-    pub const ENEMY_VIEW_DISTANCE: f32 = 6.5;
+    pub const ENEMY_VIEW_DISTANCE: f32 = 5.0;
 }

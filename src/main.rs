@@ -694,14 +694,6 @@ impl Doors {
 
     fn render_door(&self, door_h: DoorHandle) {
         if let Some(rect_hitbox) = self.get_door_hitbox(door_h) {
-            let door_index = door_h.0 as usize;
-            let progress = self.animation_progress[door_index];
-            let direction = &self.directions[door_index];
-
-            let angle = match direction {
-                DoorDirection::LEFT | DoorDirection::RIGHT => (progress * PI) / 2.0,
-                DoorDirection::UP | DoorDirection::DOWN => (-progress * PI) / 2.0,
-            };
             draw_rectangle_ex(
                 rect_hitbox.x * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 + MAP_X_OFFSET,
                 rect_hitbox.y * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
@@ -709,13 +701,12 @@ impl Doors {
                 rect_hitbox.h * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
                 DrawRectangleParams {
                     color: WHITE,
-                    rotation: angle,
                     ..Default::default()
                 }
             );
         }
     }
-    fn animate_opening(&mut self, delta_time: f32) {
+    fn update_animation(&mut self, delta_time: f32) {
         for (i, opened) in self.opened.iter_mut().enumerate() {
             if *opened && self.animation_progress[i] < 1.0 {
                 self.animation_progress[i] += delta_time / self.animation_duration;
@@ -729,27 +720,14 @@ impl Doors {
             return None;
         }
         let door_opened = self.opened[door_index];
-
         let position = &self.positions[door_index];
         let progress = self.animation_progress[door_index];
-
-        let direction = &self.directions[door_index];
-        let angle = match direction {
-            DoorDirection::LEFT | DoorDirection::RIGHT => (progress * PI) / 2.0,
-            DoorDirection::UP | DoorDirection::DOWN => -(progress * PI) / 2.0,
-        };
-
-        let door_width = self.door_width;
-        let door_height = self.door_height;
-
-        let (sin_angle, cos_angle) = angle.sin_cos();
-        let rotated_width = door_width * cos_angle + door_height * sin_angle;
-        let rotated_height = door_width * sin_angle + door_height * cos_angle;
-        if progress >= 0.44 {
-            // this means its fully opened / disappeared
-            return Some(Rect::new(position.x, position.y, door_width * 0.1, door_height));
+        if door_opened && progress >= 1.0{ // fully opened, see update_animation
+            return None
         }
-        Some(Rect::new(position.x, position.y, rotated_width, rotated_height))
+        let door_width = self.door_width  * (progress - 1.0).abs();
+        let door_height = self.door_height;
+        return Some(Rect::new(position.x, position.y, door_width, door_height));
     }
 
     fn get_ray_intersection_point(
@@ -1375,9 +1353,11 @@ impl RaycastSystem {
                         origin.x + direction.x * distance,
                         origin.y + direction.y * distance
                     );
-                    if
+                    let hitbox = &doors.get_door_hitbox(handle);
+                    if hitbox.is_none() {continue;}
+                    if 
                         let Some(point) = Doors::get_ray_intersection_point(
-                            &doors.get_door_hitbox(handle).expect("Invalid hndle to door"),
+                            &hitbox.expect("Invalid handle to door"),
                             tile_intersection,
                             direction
                         )
@@ -2390,7 +2370,7 @@ impl World {
         if let Some(interactable) = opt_interactable {
             self.player_interactables.push(interactable);
         }
-        self.doors.animate_opening(PHYSICS_FRAME_TIME);
+        self.doors.update_animation(PHYSICS_FRAME_TIME);
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let mut all_animation_callback_events = Vec::new();
 
