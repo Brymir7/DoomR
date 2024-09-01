@@ -418,7 +418,9 @@ impl AnimationState {
             AnimationType::GeneralAnimation(_) => {
                 return false;
             }
-            AnimationType::None => return false,
+            AnimationType::None => {
+                return false;
+            }
         }
     }
     fn get_source_rect(&self) -> Rect {
@@ -653,25 +655,132 @@ enum DoorDirection {
     UP,
     DOWN,
 }
+
 struct Doors {
     positions: Vec<Vec2>,
     opened: Vec<bool>,
     directions: Vec<DoorDirection>,
+    animation_progress: Vec<f32>,
+    animation_duration: f32,
+    door_width: f32,
+    door_height: f32,
 }
 
 impl Doors {
-    fn new() -> Self {
+    fn new(door_width: f32, door_height: f32, animation_duration: f32) -> Self {
         Doors {
             positions: Vec::new(),
             opened: Vec::new(),
             directions: Vec::new(),
+            animation_progress: Vec::new(),
+            animation_duration,
+            door_width,
+            door_height,
         }
     }
+
     fn add_door(&mut self, position: Vec2, direction: DoorDirection) -> DoorHandle {
         self.positions.push(position);
         self.opened.push(false);
         self.directions.push(direction);
-        return DoorHandle((self.positions.len() - 1) as u16);
+        self.animation_progress.push(0.0);
+        DoorHandle((self.positions.len() - 1) as u16)
+    }
+
+    fn render_door(&self, door_index: u16) {
+        let door_index = door_index as usize;
+        if let Some((top_left, bottom_right)) = self.get_door_hitbox(door_index) {
+            let width = bottom_right.x - top_left.x;
+            let height = bottom_right.y - top_left.y;
+
+            let progress = self.animation_progress[door_index];
+            let direction = &self.directions[door_index];
+
+            let angle = match direction {
+                DoorDirection::LEFT | DoorDirection::RIGHT => (progress * PI) / 2.0,
+                DoorDirection::UP | DoorDirection::DOWN => (-progress * PI) / 2.0,
+            };
+
+            let door_color = if self.opened[door_index] {
+                Color::new(0.8, 0.4, 0.0, 1.0)
+            } else {
+                Color::new(0.6, 0.3, 0.0, 1.0)
+            };
+
+            draw_rectangle_ex(
+                (top_left.x + width / 2.0) * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
+                    MAP_X_OFFSET,
+                (top_left.y + height / 2.0) * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
+                width * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
+                height * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
+                DrawRectangleParams {
+                    color: door_color,
+                    rotation: angle,
+                    ..Default::default()
+                }
+            );
+        }
+    }
+    fn animate_opening(&mut self, delta_time: f32) {
+        for (i, opened) in self.opened.iter_mut().enumerate() {
+            if *opened && self.animation_progress[i] < 1.0 {
+                self.animation_progress[i] += delta_time / self.animation_duration;
+                self.animation_progress[i] = self.animation_progress[i].min(1.0);
+            }
+        }
+    }
+    fn get_door_hitbox(&self, door_index: usize) -> Option<(Vec2, Vec2)> {
+        if door_index >= self.positions.len() {
+            return None;
+        }
+
+        let position = &self.positions[door_index];
+        let progress = self.animation_progress[door_index];
+        let direction = &self.directions[door_index];
+
+        let angle = (progress * PI) / 2.0;
+        let (sin, cos) = angle.sin_cos();
+
+        let (rotated_width, rotated_height) = match direction {
+            DoorDirection::LEFT | DoorDirection::RIGHT =>
+                (self.door_width * cos, self.door_width * sin + self.door_height * cos),
+            DoorDirection::UP | DoorDirection::DOWN =>
+                (self.door_height * sin + self.door_width * cos, self.door_height * cos),
+        };
+
+        let (offset_x, offset_y) = match direction {
+            DoorDirection::LEFT => (-rotated_width, 0.0),
+            DoorDirection::RIGHT => (0.0, 0.0),
+            DoorDirection::UP => (0.0, -rotated_height),
+            DoorDirection::DOWN => (0.0, 0.0),
+        };
+
+        let top_left = Vec2 {
+            x: position.x + offset_x,
+            y: position.y + offset_y,
+        };
+
+        let bottom_right = Vec2 {
+            x: top_left.x + rotated_width,
+            y: top_left.y + rotated_height,
+        };
+
+        Some((top_left, bottom_right))
+    }
+
+    fn open_door(&mut self, handle: DoorHandle) {
+        let index = handle.0 as usize;
+        if index < self.opened.len() {
+            self.opened[index] = true;
+            self.animation_progress[index] = 0.0;
+        }
+    }
+    fn close_door(&mut self, handle: DoorHandle) {
+        let index = handle.0 as usize;
+        if index < self.opened.len() {
+            self.opened[index] = false;
+            self.animation_progress[index] = 0.0;
+        }
     }
 }
 struct EnemyInformation {
@@ -681,7 +790,7 @@ struct EnemyInformation {
     health: u8,
     size: Vec2,
     aggressive: bool,
-    interactable: bool,
+    is_alive: bool,
 }
 struct Enemies {
     positions: Vec<Vec2>,
@@ -691,7 +800,7 @@ struct Enemies {
     animation_states: Vec<CompositeAnimationState>,
     aggressive_states: Vec<bool>,
     collision_data: CollisionData,
-    interactables: Vec<bool>,
+    alives: Vec<bool>,
 }
 
 impl Enemies {
@@ -704,7 +813,7 @@ impl Enemies {
             animation_states: Vec::new(),
             collision_data: CollisionData::new(0),
             aggressive_states: Vec::new(),
-            interactables: Vec::new(),
+            alives: Vec::new(),
         }
     }
 
@@ -729,7 +838,7 @@ impl Enemies {
         self.collision_data.y_collisions.push(0);
         self.collision_data.collision_times.push(Duration::from_secs(0));
         self.aggressive_states.push(false);
-        self.interactables.push(true);
+        self.alives.push(true);
         EnemyHandle(index as u16)
     }
     fn destroy_enemy(&mut self, idx: u16) {
@@ -742,7 +851,7 @@ impl Enemies {
         self.collision_data.y_collisions.swap_remove(idx as usize);
         self.collision_data.collision_times.swap_remove(idx as usize);
         self.aggressive_states.swap_remove(idx as usize);
-        self.interactables.swap_remove(idx as usize);
+        self.alives.swap_remove(idx as usize);
     }
     fn get_enemy_information(&self, idx: u16) -> EnemyInformation {
         let idx = idx as usize;
@@ -755,7 +864,7 @@ impl Enemies {
             aggressive: *self.aggressive_states
                 .get(idx)
                 .expect("Tried to acccess invalid enemy idx"),
-            interactable: *self.interactables.get(idx).expect("Tried to acccess invalid enemy idx"),
+            is_alive: *self.alives.get(idx).expect("Tried to acccess invalid enemy idx"),
         }
     }
     fn update_based_on_enemy_information(&mut self, enemy_information: EnemyInformation) {
@@ -770,8 +879,8 @@ impl Enemies {
             enemy_information.size;
         *self.aggressive_states.get_mut(idx).expect("Invalid enemy information update") =
             enemy_information.aggressive;
-        *self.interactables.get_mut(idx).expect("Invalid enemy information update") =
-            enemy_information.interactable;
+        *self.alives.get_mut(idx).expect("Invalid enemy information update") =
+            enemy_information.is_alive;
     }
 }
 struct Weapon {
@@ -855,6 +964,47 @@ impl Player {
         };
     }
 }
+struct SurroundingObjects {
+    doors: Vec<DoorHandle>,
+    enemies: Vec<EnemyHandle>,
+    // Add other categories as needed
+}
+
+struct SurroundingObjectsSystem;
+
+impl SurroundingObjectsSystem {
+    fn get_surrounding_objects(
+        player_pos: &Vec2,
+        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        check_radius: u16
+    ) -> SurroundingObjects {
+        let player_tile = Tile::from_vec2(*player_pos);
+        let mut surrounding_objects = SurroundingObjects {
+            doors: Vec::new(),
+            enemies: Vec::new(),
+        };
+
+        let start_x = ((player_tile.x as i32) - (check_radius as i32)).max(0) as usize;
+        let end_x = (player_tile.x + check_radius + 1).min(WORLD_WIDTH as u16) as usize;
+        let start_y = ((player_tile.y as i32) - (check_radius as i32)).max(0) as usize;
+        let end_y = (player_tile.y + check_radius + 1).min(WORLD_HEIGHT as u16) as usize;
+
+        for y in start_y..end_y {
+            for x in start_x..end_x {
+                match world_layout[y][x] {
+                    EntityType::Door(handle) => {
+                        surrounding_objects.doors.push(handle);
+                    }
+                    EntityType::Enemy(handle) => {
+                        surrounding_objects.enemies.push(handle);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        surrounding_objects
+    }
+}
 struct MovingEntityCollisionSystem;
 
 impl MovingEntityCollisionSystem {
@@ -863,100 +1013,29 @@ impl MovingEntityCollisionSystem {
         world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
         enemy_positions: &Vec<Vec2>,
         enemy_sizes: &Vec<Vec2>,
-        enemy_interactables: &Vec<bool>
+        enemy_alives: &Vec<bool>
     ) -> Option<WorldEventHandleBased> {
         let player_size = Vec2::new(1.0, 1.0);
         let check_radius = 2; // based on maximum enemy size
+        let surrounding_objects = SurroundingObjectsSystem::get_surrounding_objects(
+            player_pos,
+            world_layout,
+            check_radius
+        );
+        for enemy_handle in surrounding_objects.enemies {
+            let enemy_index = enemy_handle.0 as usize;
+            let enemy_is_alive = enemy_alives[enemy_index];
+            if !enemy_is_alive {
+                continue;
+            }
+            let enemy_pos = &enemy_positions[enemy_index];
+            let enemy_size = &enemy_sizes[enemy_index];
 
-        let start_x = ((player_pos.x as i32) - check_radius).max(0) as usize;
-        let end_x = ((player_pos.x as i32) + check_radius + 1).min(WORLD_WIDTH as i32) as usize;
-        let start_y = ((player_pos.y as i32) - check_radius).max(0) as usize;
-        let end_y = ((player_pos.y as i32) + check_radius + 1).min(WORLD_HEIGHT as i32) as usize;
-
-        for y in start_y..end_y {
-            for x in start_x..end_x {
-                if let EntityType::Enemy(enemy_handle) = world_layout[y][x] {
-                    let enemy_index = enemy_handle.0 as usize;
-                    let enemy_interactable = enemy_interactables[enemy_index];
-                    if !enemy_interactable {
-                        continue;
-                    }
-                    let enemy_pos = &enemy_positions[enemy_index];
-                    let enemy_size = &enemy_sizes[enemy_index];
-
-                    if Self::check_collision(player_pos, &player_size, enemy_pos, enemy_size) {
-                        return Some(WorldEventHandleBased::EnemyHitPlayer(enemy_handle));
-                    }
-                }
+            if Self::check_collision(player_pos, &player_size, enemy_pos, enemy_size) {
+                return Some(WorldEventHandleBased::EnemyHitPlayer(enemy_handle));
             }
         }
-
         None
-    }
-
-    fn check_enemy_enemy_collisions(
-        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
-        enemy_positions: &Vec<Vec2>,
-        enemy_sizes: &Vec<Vec2>,
-        enemy_interactables: &Vec<bool>
-    ) -> Vec<(EnemyHandle, EnemyHandle)> {
-        let mut collisions = Vec::new();
-        let check_radius = 2; // Based on enemy size later
-
-        for y in 0..WORLD_HEIGHT {
-            for x in 0..WORLD_WIDTH {
-                if let EntityType::Enemy(enemy_handle1) = world_layout[y][x] {
-                    let enemy_index1 = enemy_handle1.0 as usize;
-                    let enemy_interactable1 = &enemy_interactables[enemy_index1];
-                    if !enemy_interactable1 {
-                        continue;
-                    }
-                    let enemy_pos1 = &enemy_positions[enemy_index1];
-                    let enemy_size1 = &enemy_sizes[enemy_index1];
-
-                    let start_x = ((enemy_pos1.x as i32) - check_radius).max(0) as usize;
-                    let end_x = ((enemy_pos1.x as i32) + check_radius + 1).min(
-                        WORLD_WIDTH as i32
-                    ) as usize;
-                    let start_y = ((enemy_pos1.y as i32) - check_radius).max(0) as usize;
-                    let end_y = ((enemy_pos1.y as i32) + check_radius + 1).min(
-                        WORLD_HEIGHT as i32
-                    ) as usize;
-
-                    for check_y in start_y..end_y {
-                        for check_x in start_x..end_x {
-                            if
-                                let EntityType::Enemy(enemy_handle2) =
-                                    world_layout[check_y][check_x]
-                            {
-                                if enemy_handle1 != enemy_handle2 {
-                                    let enemy_index2 = enemy_handle2.0 as usize;
-                                    let enemy_interactable2 = enemy_interactables[enemy_index2];
-                                    if !enemy_interactable2 {
-                                        continue;
-                                    }
-                                    let enemy_pos2 = &enemy_positions[enemy_index2];
-                                    let enemy_size2 = &enemy_sizes[enemy_index2];
-
-                                    if
-                                        Self::check_collision(
-                                            enemy_pos1,
-                                            enemy_size1,
-                                            enemy_pos2,
-                                            enemy_size2
-                                        )
-                                    {
-                                        collisions.push((enemy_handle1, enemy_handle2));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        collisions
     }
 
     fn check_collision(pos1: &Vec2, size1: &Vec2, pos2: &Vec2, size2: &Vec2) -> bool {
@@ -1313,7 +1392,10 @@ impl RaycastSystem {
 struct RenderMap;
 impl RenderMap {
     #[inline(always)]
-    fn render_world_layout(world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]) {
+    fn render_world_layout(
+        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        doors: &Doors
+    ) {
         draw_rectangle(MAP_X_OFFSET, 0.0, (SCREEN_WIDTH as f32) - MAP_X_OFFSET, 270.0, GRAY);
         for y in 0..WORLD_HEIGHT {
             for x in 0..WORLD_WIDTH {
@@ -1328,15 +1410,8 @@ impl RenderMap {
                             BROWN
                         );
                     }
-                    EntityType::Door(_) => {
-                        draw_rectangle(
-                            (x as f32) * (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25 +
-                                MAP_X_OFFSET,
-                            (y as f32) * (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                            (config::config::TILE_SIZE_X_PIXEL as f32) * 0.25,
-                            (config::config::TILE_SIZE_Y_PIXEL as f32) * 0.25,
-                            ORANGE
-                        );
+                    EntityType::Door(handle) => {
+                        doors.render_door(handle.0);
                     }
                     _ => {}
                 }
@@ -1392,6 +1467,31 @@ impl RenderMap {
 }
 struct RenderPlayerPOV;
 impl RenderPlayerPOV {
+    fn render_possible_interactions(interactables: &Vec<InteractionEvent>) {
+        // can sort for priority here based on whnat kind of event it is, player position
+        for interactable in interactables {
+            match interactable.interaction_type {
+                InteractionType::OpenDoor(door_handle) => {
+                    draw_text(
+                        "Press E to Open door",
+                        (SCREEN_WIDTH as f32) / 2.0,
+                        (SCREEN_HEIGHT as f32) / 2.0,
+                        25.0,
+                        WHITE
+                    );
+                }
+                InteractionType::CloseDoor(door_handle) => {
+                    draw_text(
+                        "Press E to Close door",
+                        (SCREEN_WIDTH as f32) / 2.0,
+                        (SCREEN_HEIGHT as f32) / 2.0,
+                        25.0,
+                        WHITE
+                    );
+                }
+            }
+        }
+    }
     #[inline(always)]
     fn render_floor(material: &Material, player_angle: f32, player_pos: Vec2) {
         let left_most_ray_dir = Vec2::new(
@@ -1659,6 +1759,50 @@ struct SeenEnemy {
     enemy_handle: EnemyHandle,
     relative_angle: f32,
 }
+enum InteractionType {
+    OpenDoor(DoorHandle),
+    CloseDoor(DoorHandle),
+}
+
+struct InteractionEvent {
+    interaction_type: InteractionType,
+    entity: EntityType,
+}
+
+struct ProximityBasedInteractionSystem;
+impl ProximityBasedInteractionSystem {
+    fn get_possible_interactions(
+        player_pos: &Vec2,
+        world_layout: &[[EntityType; WORLD_WIDTH]; WORLD_HEIGHT],
+        door_positions: &Vec<Vec2>,
+        door_opened_states: &Vec<bool>,
+        interaction_radius: f32
+    ) -> Option<InteractionEvent> {
+        let surrounding_objects = SurroundingObjectsSystem::get_surrounding_objects(
+            player_pos,
+            world_layout,
+            2
+        );
+        if let Some(door_handle) = surrounding_objects.doors.first() {
+            let door_tile = Tile::from_vec2(door_positions[door_handle.0 as usize]);
+            let distance = (
+                ((door_tile.x as f32) - player_pos.x).powi(2) +
+                ((door_tile.y as f32) - player_pos.y).powi(2)
+            ).sqrt();
+            if distance <= interaction_radius {
+                return Some(InteractionEvent {
+                    interaction_type: if door_opened_states[door_handle.0 as usize] {
+                        InteractionType::CloseDoor(*door_handle)
+                    } else {
+                        InteractionType::OpenDoor(*door_handle)
+                    },
+                    entity: EntityType::Player,
+                });
+            }
+        }
+        None
+    }
+}
 struct EnemyAggressionSystem;
 impl EnemyAggressionSystem {
     fn toggle_enemy_aggressive(
@@ -1666,15 +1810,15 @@ impl EnemyAggressionSystem {
         enemy_positions: &Vec<Vec2>,
         enemy_velocities: &mut Vec<Vec2>,
         aggressive_states: &mut Vec<bool>,
-        enemy_interactables: &Vec<bool>
+        enemy_alives: &Vec<bool>
     ) {
         let tile_pos_player = player_pos.trunc();
-        for (((enemy_pos, enemy_vel), is_aggressive), interactable) in enemy_positions
+        for (((enemy_pos, enemy_vel), is_aggressive), is_alive) in enemy_positions
             .iter()
             .zip(enemy_velocities.iter_mut())
             .zip(aggressive_states.iter_mut())
-            .zip(enemy_interactables.iter()) {
-            if !interactable {
+            .zip(enemy_alives.iter()) {
+            if !is_alive {
                 continue;
             }
             let dist_vector = tile_pos_player - enemy_pos.trunc();
@@ -1694,11 +1838,11 @@ impl PlayEnemyAnimation {
         enemy_handle: EnemyHandle,
         velocities: &mut Vec<Vec2>,
         animation_states: &mut Vec<CompositeAnimationState>,
-        interactables: &mut Vec<bool>
+        alives: &mut Vec<bool>
     ) {
         let enemy_animation_state = &mut animation_states[enemy_handle.0 as usize];
         let velocity = &mut velocities[enemy_handle.0 as usize];
-        let interactable = &mut interactables[enemy_handle.0 as usize];
+        let is_alive = &mut alives[enemy_handle.0 as usize];
         enemy_animation_state.main_state.set_callback(AnimationCallbackEvent {
             event_type: AnimationCallbackEventType::KillEnemy,
             target_handle: AllHandleTypes::EnemyHandle(enemy_handle),
@@ -1706,28 +1850,10 @@ impl PlayEnemyAnimation {
         enemy_animation_state.main_state.set_physics_frames_per_update(20.0);
         enemy_animation_state.main_state.color = Color::from_rgba(255, 0, 0, 255);
         *velocity = Vec2::ZERO;
-        *interactable = false;
+        *is_alive = false;
     }
-    // fn play_got_hit(
-    //     enemy_handle: EnemyHandle,
-    //     animation_states: &mut Vec<AnimationState>,
-    //     interactables: &mut Vec<bool>
-    // ) {
-    //     let enemy_animation_state = &mut animation_states[enemy_handle.0 as usize];
-    //     let interactable = &mut interactables[enemy_handle.0 as usize];
-    //     if !*interactable {return;}
-
-    //     enemy_animation_state.set_callback(AnimationCallbackEvent {
-    //         event_type: AnimationCallbackEventType::KillEnemy,
-    //         target_handle: enemy_handle,
-    //     });
-    //     enemy_animation_state.set_physics_frames_per_update(20.0);
-    //     enemy_animation_state.color = Color::from_rgba(255, 0, 0, 255);
-
-    //     *interactable = false;
-    // }
 }
-struct PlayParticleEffect {}
+
 struct CameraShake {
     duration: f32,
     intensity: f32,
@@ -1772,13 +1898,14 @@ struct World {
     doors: Doors,
     enemies: Enemies,
     player: Player,
+    player_interactables: Vec<InteractionEvent>,
     postprocessing: VisualEffect,
 }
 impl World {
     async fn default() -> Self {
         let mut walls = Vec::new();
         let mut enemies = Enemies::new();
-        let mut doors = Doors::new();
+        let mut doors = Doors::new(1.0, 0.5, 2.0);
         let mut player = Player {
             pos: Vec2::new(0.0, 0.0),
             angle: 0.0,
@@ -1981,6 +2108,7 @@ impl World {
             doors,
             enemies,
             player,
+            player_interactables: Vec::new(),
             shoot_sound,
             reload_sound,
             postprocessing: VisualEffect::None,
@@ -2030,7 +2158,7 @@ impl World {
                         EnemyHandle(event.other_involved),
                         &mut self.enemies.velocities,
                         &mut self.enemies.animation_states,
-                        &mut self.enemies.interactables
+                        &mut self.enemies.alives
                     );
                     return;
                 }
@@ -2073,6 +2201,18 @@ impl World {
                 self.handle_world_event_handle_based(event);
             }
         }
+        if is_key_pressed(KeyCode::E) {
+            for interactable in &self.player_interactables {
+                match interactable.interaction_type {
+                    InteractionType::OpenDoor(door_handle) => {
+                        self.doors.open_door(door_handle);
+                    }
+                    InteractionType::CloseDoor(door_handle) => {
+                        self.doors.close_door(door_handle);
+                    }
+                }
+            }
+        }
     }
 
     fn update(&mut self) {
@@ -2093,7 +2233,7 @@ impl World {
             &self.world_layout,
             &self.enemies.positions,
             &self.enemies.sizes,
-            &self.enemies.interactables
+            &self.enemies.alives
         );
         if let Some(event) = event {
             self.handle_world_event_handle_based(event);
@@ -2103,8 +2243,19 @@ impl World {
             &self.enemies.positions,
             &mut self.enemies.velocities,
             &mut self.enemies.aggressive_states,
-            &self.enemies.interactables
+            &self.enemies.alives
         );
+        self.player_interactables.clear();
+        let opt_interactable = ProximityBasedInteractionSystem::get_possible_interactions(
+            &self.player.pos,
+            &self.world_layout,
+            &self.doors.positions,
+            &self.doors.opened,
+            2.0
+        );
+        if let Some(interactable) = opt_interactable {
+            self.player_interactables.push(interactable);
+        }
         // we can rewrite the rendering logic to use this, then put the callbacks into a queue and only update visible enemies animations
         let mut all_animation_callback_events = Vec::new();
 
@@ -2211,8 +2362,9 @@ impl World {
             _ => todo!(),
         }
         RenderPlayerPOV::render_weapon(&self.player);
+        RenderPlayerPOV::render_possible_interactions(&self.player_interactables);
         gl_use_default_material();
-        RenderMap::render_world_layout(&self.world_layout);
+        RenderMap::render_world_layout(&self.world_layout, &self.doors);
         RenderMap::render_player_and_enemies_on_map(self.player.pos, &self.enemies);
         RenderMap::render_rays(player_ray_origin, &raycast_result);
 
