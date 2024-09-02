@@ -889,6 +889,9 @@ struct Player {
     health: u16,
     weapon: Weapon,
     animation_state: CompositeAnimationState,
+    bobbing_time: f32,
+    bobbing_speed: f32,
+    bobbing_amount: f32,
 }
 impl Player {
     fn shoot(
@@ -1147,9 +1150,14 @@ impl MovementSystem {
         world_layout: &mut [[EntityType; WORLD_WIDTH]; WORLD_HEIGHT]
     ) {
         let prev_tile = Tile::from_vec2(player.pos);
-        player.pos += player.vel * PHYSICS_FRAME_TIME;
+        player.pos += player.vel * PHYSICS_FRAME_TIME * 1.5;
         Self::player_resolve_wall_collisions(&mut player.pos, walls); // we could only iterate over a subset using Surrounding
         Self::player_resolve_door_collision(&mut player.pos, doors); // we could only iterate over a subset using Surrounding.
+        if player.vel.length() > 0.0 {
+            player.bobbing_time += PHYSICS_FRAME_TIME ;
+        } else {
+            player.bobbing_time = 0.0;
+        }
         let new_tile = Tile::from_vec2(player.pos);
         match world_layout[new_tile.y as usize][new_tile.x as usize] {
             EntityType::Door(_) => {
@@ -1801,7 +1809,7 @@ impl RenderPlayerPOV {
     }
 
     #[inline(always)]
-    fn render_weapon(player: &Player) {
+    fn render_weapon(player: &Player, bobbing_offset: f32) {
         let weapon_texture = &player.animation_state.main_state.sprite_sheet;
         player.animation_state.render_effects(
             Vec2::new(
@@ -1812,7 +1820,7 @@ impl RenderPlayerPOV {
         );
         draw_texture_ex(
             weapon_texture,
-            (SCREEN_WIDTH as f32) * 0.5 - weapon_texture.width() * 0.5,
+            HALF_SCREEN_WIDTH - weapon_texture.width() * 0.5  + bobbing_offset*weapon_texture.width() * 2.0,
             (SCREEN_HEIGHT as f32) * 0.85 - weapon_texture.height(),
             Color::from_rgba(255, 255, 255, 255),
             DrawTextureParams {
@@ -2045,6 +2053,9 @@ impl World {
             health: 3,
             weapon: Weapon::default(),
             animation_state: CompositeAnimationState::new(AnimationState::default_weapon()),
+            bobbing_amount: 0.1,
+            bobbing_time: 0.0,
+            bobbing_speed: 11.0,
         };
         let layout = config::config::WORLD_LAYOUT;
         let mut world_layout = [[EntityType::None; WORLD_WIDTH]; WORLD_HEIGHT];
@@ -2316,11 +2327,11 @@ impl World {
             self.player.vel = Vec2::new(0.0, 0.0);
         }
         if is_key_down(KeyCode::A) {
-            self.player.angle -= 0.75 * get_frame_time();
+            self.player.angle -= 0.9 * get_frame_time();
             self.player.angle = self.player.angle.rem_euclid(2.0 * PI);
         }
         if is_key_down(KeyCode::D) {
-            self.player.angle += 0.75 * get_frame_time();
+            self.player.angle += 0.9 * get_frame_time();
             self.player.angle = self.player.angle.rem_euclid(2.0 * PI);
         }
         if is_key_pressed(KeyCode::Space) {
@@ -2432,7 +2443,12 @@ impl World {
 
     fn draw(&mut self) {
         clear_background(LIGHTGRAY);
-        let player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
+        let  player_ray_origin = self.player.pos + Vec2::new(0.5, 0.5);
+        let mut bobbing_offset = 0.0;
+        if self.player.vel.length() > 0.0 {
+            bobbing_offset = (self.player.bobbing_time * self.player.bobbing_speed).sin() * self.player.bobbing_amount;
+        }
+        
         let start_time: f64 = get_time();
         let raycast_result = RaycastSystem::raycast(
             player_ray_origin,
@@ -2512,7 +2528,7 @@ impl World {
             }
             VisualEffect::None => {}
         }
-        RenderPlayerPOV::render_weapon(&self.player);
+        RenderPlayerPOV::render_weapon(&self.player, bobbing_offset);
         RenderPlayerPOV::render_health(self.player.health);
         RenderPlayerPOV::render_possible_interactions(
             self.player.pos,
@@ -2541,6 +2557,11 @@ impl World {
 async fn main() {
     let mut elapsed_time = 0.0;
     let mut world = World::default().await;
+    let bg_music = load_sound("sounds/music.wav").await.expect("Failed to load background music");
+    play_sound(&bg_music, PlaySoundParams {
+        looped: true,
+        volume: 0.3,
+    });
     loop {
         elapsed_time += get_frame_time();
         match world.game_state {
@@ -2568,7 +2589,7 @@ async fn main() {
                     WHITE
                 );
                 if is_key_down(KeyCode::Escape) {
-                    exit(1);
+                    exit(0);
                 }
                 if is_key_down(KeyCode::Space) {
                     world = World::default().await;
