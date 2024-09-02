@@ -22,7 +22,6 @@ cargo run --release
 
 ## Known Limitations
 
-- **Enemy AI**: AI behavior is basic and may not respond perfectly in complex environments.
 - **Collision**: Collision works, but enemies sometimes get stuck in a diagonal Wall for a bit too long.
 - **Level Design**: Levels are simple, there's no winning.
 - **Fisheye Effect**: Kept the fish eye effect because it looks cool. (This makes walking through 1 wide places a bit unclear visually).
